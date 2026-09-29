@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+# Regenerable from source.blend with the scripts in blender/
+renders/
+blender/*.blend
+blender/*.blend1
+blender/*.log

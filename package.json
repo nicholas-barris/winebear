@@ -1,0 +1,12 @@
+{
+  "name": "winebear",
+  "private": true,
+  "description": "Wine Bear Presents: S'Care Bear — tilt-to-look 3D invite",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
