@@ -1,7 +1,8 @@
 // Static server for public/ with byte-range support (iOS Safari won't play video without it).
 // Railway runs this via `npm start`; locally: `node server.mjs`, then open http://localhost:8000.
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +18,17 @@ const TYPES = {
   ".webp": "image/webp",
   ".mp4": "video/mp4",
 };
+
+// Content-hash ETags: builds may reset file timestamps, so mtimes can't tell deploys apart.
+const etags = new Map();
+function etagFor(file, stat) {
+  const key = `${stat.size}:${stat.mtimeMs}`;
+  const hit = etags.get(file);
+  if (hit && hit.key === key) return hit.etag;
+  const etag = `"${createHash("sha1").update(readFileSync(file)).digest("base64url").slice(0, 20)}"`;
+  etags.set(file, { key, etag });
+  return etag;
+}
 
 createServer((req, res) => {
   let path;
@@ -37,16 +49,16 @@ createServer((req, res) => {
   if (!stat.isFile()) return res.writeHead(404).end("not found");
 
   // Always revalidate, so a redeploy never mixes old and new assets; unchanged files get a 304.
+  const etag = etagFor(file, stat);
   const headers = {
     "Content-Type": TYPES[extname(file)] || "application/octet-stream",
     "Accept-Ranges": "bytes",
     "Cache-Control": "no-cache",
-    "Last-Modified": stat.mtime.toUTCString(),
+    "ETag": etag,
   };
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
-  if (!range && Date.parse(req.headers["if-modified-since"] || "") >= Math.floor(stat.mtimeMs / 1000) * 1000) {
-    return res.writeHead(304, headers).end();
-  }
+  const fresh = (req.headers["if-none-match"] || "").split(",").some(t => t.trim().replace(/^W\//, "") === etag);
+  if (!range && fresh) return res.writeHead(304, headers).end();
   let start = 0, end = stat.size - 1, status = 200;
   if (range && (range[1] || range[2])) {
     start = range[1] ? Number(range[1]) : Math.max(0, stat.size - Number(range[2]));
