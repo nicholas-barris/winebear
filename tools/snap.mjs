@@ -85,7 +85,10 @@ async function evalJs(expr) {
 
 for (let i = 0; i < 40 && (await evalJs("!!document.getElementById('loading')")); i++) await sleep(250);
 if (process.env.MAGENTA) await evalJs("gl.clearColor(1, 0, 1, 1)");
-await snap("0-start");
+await snap("0-dark");
+await evalJs("document.getElementById('chain').click()");
+await sleep(160);
+await snap("0-pulled");
 await sleep(2000);
 await snap("1-mid-reveal");
 await sleep(5000);

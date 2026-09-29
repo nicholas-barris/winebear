@@ -11,6 +11,10 @@ const DATE_GAP = 10;               // CSS px kept clear between the date and the
 const LAYERS = ["room", "chars", "lamp", "sign"];   // back to front
 const GROUPS = ["heading", "title", "prefix", "floor"];
 const BULB_COLOR = [1.0, 0.75, 0.35];
+const DARK = 0.1;                  // room brightness before the chain is pulled
+const BULB_ON = [[0, 0.6], [0.05, 0.1], [0.13, 0.9], [0.2, 0.3], [0.3, 1]];   // sputter after the pull
+const NEON_DELAY = 600;            // ms from the pull to the start of the neon reveal
+const CHAIN = { side: 0.045, rise: 0.05, length: 0.36 };                       // metres, from the bulb
 
 // Stepped [seconds, level] keys after the tap, echoing the Blender flicker timing.
 const REVEAL = {
@@ -110,6 +114,7 @@ void main() {
 const canvas = document.getElementById("scene");
 const loadingEl = document.getElementById("loading");
 const rsvp = document.getElementById("rsvp");
+const chain = document.getElementById("chain");
 
 const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
 if (!gl) {
@@ -376,24 +381,27 @@ function onPointer(e) {
   tilt.lastInput = performance.now();
 }
 
-// iOS only exposes motion to https pages, and only asks for permission from inside a tap,
-// so the first tap anywhere (other than RSVP) asks; everywhere else listens straight away.
-function setupMotion() {
+// iOS only exposes motion to https pages, and only asks for permission from inside a tap
+// (the chain pull); everywhere else listens from page load.
+function setupMotion(fromTap) {
   const DOE = window.DeviceOrientationEvent;
   if (!window.isSecureContext || !DOE) return;
-  if (typeof DOE.requestPermission !== "function") {
-    addEventListener("deviceorientation", onOrientation);
-    return;
-  }
-  const ask = e => {
-    if (e.target.closest("#rsvp")) return;
-    removeEventListener("touchend", ask);
-    if (swing) swing.play();
-    DOE.requestPermission()
-      .then(state => { if (state === "granted") addEventListener("deviceorientation", onOrientation); })
-      .catch(() => {});
-  };
-  addEventListener("touchend", ask);
+  const ask = typeof DOE.requestPermission === "function";
+  if (ask !== fromTap) return;
+  (ask ? DOE.requestPermission() : Promise.resolve("granted"))
+    .then(state => { if (state === "granted") addEventListener("deviceorientation", onOrientation); })
+    .catch(() => {});
+}
+
+let lightsOnAt = null;
+
+function pull() {
+  if (lightsOnAt !== null) return;
+  lightsOnAt = performance.now();
+  revealStart = lightsOnAt + NEON_DELAY;
+  chain.classList.add("pulled");
+  if (swing) swing.play();
+  setupMotion(true);
 }
 
 addEventListener("pointermove", onPointer);
@@ -501,6 +509,20 @@ function toCanvas(viewProj, p) {
   return [(x + 1) / 2 * canvas.width, (y + 1) / 2 * canvas.height];
 }
 
+// The chain hangs from beside the bulb, parallel to the cord, and swings with the lamp.
+function placeChain(viewProj, sw, angle) {
+  const up = norm([sw.pivot[0] - sw.bulb[0], sw.pivot[1] - sw.bulb[1], sw.pivot[2] - sw.bulb[2]]);
+  const top = [0, 1, 2].map(i => sw.bulb[i] + up[i] * CHAIN.rise + (i === 0 ? CHAIN.side : 0));
+  const end = top.map((v, i) => v - up[i] * CHAIN.length);
+  const scale = canvas.width / innerWidth;
+  const [a, b] = [top, end].map(p => {
+    const [x, y] = toCanvas(viewProj, rotateAround(p, sw.pivot, sw.axis, angle));
+    return [x / scale, innerHeight - y / scale];
+  });
+  chain.style.height = `${Math.hypot(b[0] - a[0], b[1] - a[1])}px`;
+  chain.style.transform = `translate(${a[0]}px, ${a[1]}px) rotate(${Math.atan2(a[0] - b[0], b[1] - a[1])}rad)`;
+}
+
 function frame(now) {
   // With no recent input, drift gently so the room never looks frozen.
   if (now - tilt.lastInput > 2500) {
@@ -519,12 +541,13 @@ function frame(now) {
   const viewProj = mul(proj, lookAt(eye, [0, 0, -scene.m.focus]));
   const power = updateNeon(now);
   const bulb = 1 + Math.sin(now / 170) * 0.012 + Math.sin(now / 47) * 0.008;
+  const bulbLevel = lightsOnAt === null ? 0 : stepped(BULB_ON, (now - lightsOnAt) / 1000, 0);
 
   gl.useProgram(scenePass.p);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.uniformMatrix4fv(u.uViewProj, false, viewProj);
   gl.uniform4f(u.uLevels, levels.heading, levels.title, levels.prefix, levels.floor);
-  gl.uniform1f(u.uPower, power * bulb);
+  gl.uniform1f(u.uPower, power * bulb * (DARK + (1 - DARK) * bulbLevel));
   gl.uniform1f(u.uTime, now / 1000);
   if (swing) {
     gl.activeTexture(gl.TEXTURE6);
@@ -556,9 +579,10 @@ function frame(now) {
     gl.blendFunc(gl.ONE, gl.ONE);
     gl.uniform2fv(haloPass.u.uCenter, toCanvas(viewProj, rotateAround(sw.bulb, sw.pivot, sw.axis, angle)));
     gl.uniform1f(haloPass.u.uSize, canvas.height);
-    gl.uniform3fv(haloPass.u.uColor, BULB_COLOR.map(c => c * power * bulb));
+    gl.uniform3fv(haloPass.u.uColor, BULB_COLOR.map(c => c * power * bulb * bulbLevel));
     gl.bindVertexArray(haloVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    placeChain(viewProj, sw, angle);
   }
   requestAnimationFrame(frame);
 }
@@ -574,8 +598,10 @@ async function main() {
   addEventListener("resize", resize);
   requestAnimationFrame(frame);
   loadingEl.remove();
-  revealStart = performance.now();
-  setupMotion();
+  chain.hidden = !scene.m.swing;
+  chain.addEventListener("click", pull);
+  canvas.addEventListener("click", pull);
+  setupMotion(false);
 }
 
 main().catch(err => {
