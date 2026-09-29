@@ -64,7 +64,7 @@ uniform vec4 uGlowRect[4];   // each glow crop within the layer: uv offset, uv s
 uniform vec4 uLightRect;     // this layer's region of the swing lighting video
 uniform float uUseLight;
 uniform vec4 uLevels;        // heading, title, prefix, floor
-uniform float uPower;        // bulb wobble, brownouts, pre-tap dimming
+uniform float uPower;        // bulb wobble and brownouts
 uniform float uGrain;
 uniform float uTime;
 uniform vec2 uResolution;
@@ -108,7 +108,6 @@ void main() {
 }`;
 
 const canvas = document.getElementById("scene");
-const enterBtn = document.getElementById("enter");
 const loadingEl = document.getElementById("loading");
 const rsvp = document.getElementById("rsvp");
 
@@ -377,16 +376,24 @@ function onPointer(e) {
   tilt.lastInput = performance.now();
 }
 
-// iOS only exposes motion to https pages, and only after a tap grants permission.
-async function enableMotion() {
+// iOS only exposes motion to https pages, and only asks for permission from inside a tap,
+// so the first tap anywhere (other than RSVP) asks; everywhere else listens straight away.
+function setupMotion() {
   const DOE = window.DeviceOrientationEvent;
   if (!window.isSecureContext || !DOE) return;
-  if (typeof DOE.requestPermission === "function") {
-    try {
-      if ((await DOE.requestPermission()) !== "granted") return;
-    } catch { return; }
+  if (typeof DOE.requestPermission !== "function") {
+    addEventListener("deviceorientation", onOrientation);
+    return;
   }
-  addEventListener("deviceorientation", onOrientation);
+  const ask = e => {
+    if (e.target.closest("#rsvp")) return;
+    removeEventListener("touchend", ask);
+    if (swing) swing.play();
+    DOE.requestPermission()
+      .then(state => { if (state === "granted") addEventListener("deviceorientation", onOrientation); })
+      .catch(() => {});
+  };
+  addEventListener("touchend", ask);
 }
 
 addEventListener("pointermove", onPointer);
@@ -512,13 +519,12 @@ function frame(now) {
   const viewProj = mul(proj, lookAt(eye, [0, 0, -scene.m.focus]));
   const power = updateNeon(now);
   const bulb = 1 + Math.sin(now / 170) * 0.012 + Math.sin(now / 47) * 0.008;
-  const dark = revealStart === null ? 0.55 : 1;
 
   gl.useProgram(scenePass.p);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.uniformMatrix4fv(u.uViewProj, false, viewProj);
   gl.uniform4f(u.uLevels, levels.heading, levels.title, levels.prefix, levels.floor);
-  gl.uniform1f(u.uPower, power * bulb * dark);
+  gl.uniform1f(u.uPower, power * bulb);
   gl.uniform1f(u.uTime, now / 1000);
   if (swing) {
     gl.activeTexture(gl.TEXTURE6);
@@ -550,7 +556,7 @@ function frame(now) {
     gl.blendFunc(gl.ONE, gl.ONE);
     gl.uniform2fv(haloPass.u.uCenter, toCanvas(viewProj, rotateAround(sw.bulb, sw.pivot, sw.axis, angle)));
     gl.uniform1f(haloPass.u.uSize, canvas.height);
-    gl.uniform3fv(haloPass.u.uColor, BULB_COLOR.map(c => c * power * bulb * dark));
+    gl.uniform3fv(haloPass.u.uColor, BULB_COLOR.map(c => c * power * bulb));
     gl.bindVertexArray(haloVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
@@ -568,13 +574,8 @@ async function main() {
   addEventListener("resize", resize);
   requestAnimationFrame(frame);
   loadingEl.remove();
-  enterBtn.hidden = false;
-  enterBtn.addEventListener("click", () => {
-    enterBtn.remove();
-    revealStart = performance.now();
-    if (swing) swing.play();
-    enableMotion();
-  }, { once: true });
+  revealStart = performance.now();
+  setupMotion();
 }
 
 main().catch(err => {

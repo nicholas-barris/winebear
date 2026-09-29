@@ -1,5 +1,5 @@
 // Headless check: serves public/ on a fake https origin via CDP, emulates a phone,
-// taps to enter, and screenshots the reveal and tilt. Usage: node tools/snap.mjs [outDir]
+// waits for load, and screenshots the reveal and tilt. Usage: node tools/snap.mjs [outDir]
 import { spawn } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join, extname, dirname } from "node:path";
@@ -83,10 +83,9 @@ async function evalJs(expr) {
   return r.result.value;
 }
 
-for (let i = 0; i < 40 && !(await evalJs("!document.getElementById('enter').hidden")); i++) await sleep(250);
+for (let i = 0; i < 40 && (await evalJs("!!document.getElementById('loading')")); i++) await sleep(250);
 if (process.env.MAGENTA) await evalJs("gl.clearColor(1, 0, 1, 1)");
-await snap("0-enter");
-await evalJs("document.getElementById('enter').click()");
+await snap("0-start");
 await sleep(2000);
 await snap("1-mid-reveal");
 await sleep(5000);

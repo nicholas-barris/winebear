@@ -29,38 +29,15 @@ html, body {
   text-shadow: 0 0 4px #c7b4ff, 0 0 14px #9a7fe0, 0 0 30px #8169af;
 }
 
-#loading, #enter {
+#loading {
   position: fixed;
   inset: 0;
-  margin: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.8rem;
-  background: transparent;
-  border: 0;
-  font: inherit;
-  cursor: pointer;
-}
-
-#loading {
   font-size: 1.1rem;
   letter-spacing: 0.1em;
   animation: buzz 2.4s infinite steps(1);
-}
-
-.enter-title {
-  font-size: clamp(2.2rem, 11vw, 4rem);
-  font-weight: 300;
-  animation: buzz 3.1s infinite steps(1);
-}
-
-.enter-sub {
-  font-size: 0.95rem;
-  letter-spacing: 0.18em;
-  text-transform: lowercase;
-  opacity: 0.75;
 }
 
 @keyframes buzz {
