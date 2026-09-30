@@ -20,7 +20,7 @@ Three.js owns every draw call. RawShaderMaterial preserves the existing Blender-
 
 Rapier runs at 120 fixed steps per second with interpolated display poses. It uses the precomputed head hull, a floor aligned to the Blender floor, and invisible bounds to keep the toy in view. Grabbing applies a damped spring force. Geometry, UVs and normals used for rendering are not simplified.
 
-Collision proxies do not include the other character or furnishings. The original room shadows remain baked; a soft contact shadow follows the loose head. Rendering and physics controllers live in this directory. The former renderer remains in the repository for reference; the main page loads the bundled physics runtime.
+Collision proxies do not include the other character or furnishings. The original room shadows remain baked; a soft contact shadow follows the loose head. Rendering and physics controllers live in this directory. The unused former renderer has been removed; its source is recoverable from Git history. The main page loads the bundled physics runtime.
 
 ## Rebuild
 
