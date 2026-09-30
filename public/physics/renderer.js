@@ -1,4 +1,4 @@
-import * as THREE from '../vendor/three.module.js';
+import * as THREE from 'three';
 import {SHADERS as S} from './shaders.js';
 
 const GROUPS=['heading','title','prefix','floor'];
@@ -85,18 +85,16 @@ export class ThreeStage {
     return {parts:this.lampParts,data};
   }
   createHead(data,binary,image,albedo){
-    const view=new DataView(binary),n=data.vertexCount,positions=new Float32Array(n*3),normals=new Float32Array(n*3),uvs=new Float32Array(n*2),cells=new Map();
-    for(let i=0;i<n;i++){
-      const offset=i*data.vertexStride;
-      for(let j=0;j<3;j++){positions[i*3+j]=data.positionOffset[j]+view.getUint16(offset+j*2,true)/65535*data.positionScale[j];normals[i*3+j]=view.getInt8(offset+6+j)/127;}
-      uvs[i*2]=view.getUint16(offset+10,true)/65535;uvs[i*2+1]=view.getUint16(offset+12,true)/65535;
-      const p=Array.from(positions.subarray(i*3,i*3+3)), key=p.map(x=>Math.round(x/.025)).join(',');
-      if(!cells.has(key))cells.set(key,p.map((v,j)=>v-data.pivot[j]));
-    }
-    const g=new THREE.BufferGeometry();g.setAttribute('aPosition',new THREE.BufferAttribute(positions,3));g.setAttribute('aNormal',new THREE.BufferAttribute(normals,3));g.setAttribute('aUv',new THREE.BufferAttribute(uvs,2));
+    const n=data.vertexCount;
+    const words=new THREE.InterleavedBuffer(new Uint16Array(binary,0,n*7),7);
+    const bytes=new THREE.InterleavedBuffer(new Int8Array(binary,0,n*14),14);
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('aPosition',new THREE.InterleavedBufferAttribute(words,3,0,true));
+    g.setAttribute('aNormal',new THREE.InterleavedBufferAttribute(bytes,3,6,true));
+    g.setAttribute('aUv',new THREE.InterleavedBufferAttribute(words,2,5,true));
     g.setIndex(new THREE.BufferAttribute(new Uint32Array(binary,data.indexByteOffset,data.indexCount),1));
     const source=this.layers.find(l=>l.name==='chars'), m=this.m;
-    const values={uViewProj:new THREE.Matrix4(),uPivot:data.pivot,uTranslation:[0,0,0],uRotation:[0,0,0,1],uPositionOffset:[0,0,0],uPositionScale:[1,1,1],uCover:[1,1],uLift:0,
+    const values={uViewProj:new THREE.Matrix4(),uPivot:data.pivot,uTranslation:[0,0,0],uRotation:[0,0,0,1],uPositionOffset:data.positionOffset,uPositionScale:data.positionScale,uCover:[1,1],uLift:0,
       uTexture:tex(image,{flipY:data.texture.flipY,mipmaps:true}),uAlbedo:tex(albedo,{flipY:data.texture.flipY,mipmaps:true}),uEye:[0,0,0],uBulb:m.swing.bulb,uBulbLevel:1,
       uColor:[1,1,1],uLightBlend:[0,0,0],uSourceRect:source.rect,uLightRect:source.lightRect,uGlowRect:source.glowRects,uLevels:[1,1,1,1],
       uCam:[m.tanX,m.tanY,m.zNear,m.zFar],uImage:[m.width,m.height],uResolution:[1,1],uTextured:1,uAlpha:1,uPower:1,uBackPower:1,uStep:source.step,uLightReference:m.motion.lighting.reference,
@@ -105,7 +103,16 @@ export class ThreeStage {
     this.headObject=mesh(g,this.headMaterials);this.heads.add(this.headObject);
     this.shadowMaterial=material('SHADOW_VERT','SHADOW_FRAG',{uViewProj:new THREE.Matrix4(),uCenter:[0,0,0],uUp:[0,1,0],uCover:[1,1],uLift:0,uAlpha:0});
     this.shadows.add(mesh(quad('aUv',[-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),this.shadowMaterial));
-    return {data,collisionPoints:new Float32Array([...cells.values()].flat())};
+    return {data};
+  }
+  async prepareHead(){
+    const r=this.renderer;
+    if(r.extensions.has('KHR_parallel_shader_compile')) {
+      await r.compileAsync(this.heads,this.camera);await r.compileAsync(this.shadows,this.camera);
+    } else {r.compile(this.heads,this.camera);r.compile(this.shadows,this.camera);}
+    const previous=r.getRenderTarget(),target=new THREE.WebGLRenderTarget(1,1);
+    try {r.setRenderTarget(target);r.render(this.heads,this.camera);r.render(this.shadows,this.camera);}
+    finally {r.setRenderTarget(previous);target.dispose();}
   }
   setHeadMask(img){const t=tex(img,{nearest:true});this.layers.find(l=>l.name==='chars').material.uniforms.uHeadMask.value=t;return t;}
   draw(o){

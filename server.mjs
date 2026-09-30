@@ -2,7 +2,7 @@
 // Railway runs this via `npm start`; locally: `node server.mjs`, then open http://localhost:8000.
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { createReadStream, readFileSync, statSync } from "node:fs";
+import { createReadStream, readFileSync, statSync, existsSync } from "node:fs";
 import { extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +17,7 @@ const TYPES = {
   ".png": "image/png",
   ".webp": "image/webp",
   ".mp4": "video/mp4",
+  ".wasm": "application/wasm",
 };
 
 // Content-hash ETags: builds may reset file timestamps, so mtimes can't tell deploys apart.
@@ -37,9 +38,17 @@ createServer((req, res) => {
   } catch {
     return res.writeHead(400).end();
   }
-  const file = normalize(join(ROOT, path.endsWith("/") ? path + "index.html" : path));
+  let file = normalize(join(ROOT, path.endsWith("/") ? path + "index.html" : path));
   if (!file.startsWith(ROOT + sep)) return res.writeHead(403).end();
 
+  const type = TYPES[extname(file)] || "application/octet-stream";
+  const isWasm = extname(file) === ".wasm";
+  const acceptsGzip = (req.headers["accept-encoding"] || "").split(",").some(value => {
+    const [coding, ...parameters] = value.trim().toLowerCase().split(";");
+    return coding === "gzip" && !parameters.some(p => /^\s*q\s*=/.test(p) && Number(p.split("=")[1]) === 0);
+  });
+  const compressed = isWasm && acceptsGzip && existsSync(file + ".gz");
+  if (compressed) file += ".gz";
   let stat;
   try {
     stat = statSync(file);
@@ -51,7 +60,9 @@ createServer((req, res) => {
   // Always revalidate, so a redeploy never mixes old and new assets; unchanged files get a 304.
   const etag = etagFor(file, stat);
   const headers = {
-    "Content-Type": TYPES[extname(file)] || "application/octet-stream",
+    "Content-Type": type,
+    ...(isWasm ? { "Vary": "Accept-Encoding" } : {}),
+    ...(compressed ? { "Content-Encoding": "gzip" } : {}),
     "Accept-Ranges": "bytes",
     "Cache-Control": "no-cache",
     "ETag": etag,

@@ -1,1 +1,1 @@
-Local prototype dependencies from npm: three 0.186.1 (MIT), @dimforge/rapier3d-compat 0.21.0 (Apache-2.0). No external network requests required.
+Third-party licenses for the physics preview: three 0.186.1 (MIT), @dimforge/rapier3d 0.21.0 (Apache-2.0). Browser code is bundled in physics/runtime.js with separate Rapier WASM. Rebuild using npm ci followed by npm run build:physics. No runtime CDN requests.

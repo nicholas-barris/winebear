@@ -1,23 +1,23 @@
-import RAPIER from '../vendor/rapier.js';
-import {Quaternion,Vector3} from '../vendor/three.module.js';
+import {World,RigidBodyDesc,ColliderDesc} from '@dimforge/rapier3d';
+import {Quaternion,Vector3} from 'three';
 
 // Render the original Blender mesh; simulate a convex collision hull at 120 Hz.
 export class PhysicsHead extends HeadDrop {
-  constructor(data,reduced,points) {
+  constructor(data,reduced,collision) {
     super(data,reduced);
     const n=data.floor.normal;
-    this.world=new RAPIER.World({x:-9.81*n[0],y:-9.81*n[1],z:-9.81*n[2]});
+    this.world=new World({x:-9.81*n[0],y:-9.81*n[1],z:-9.81*n[2]});
     this.world.timestep=1/120;
     const q=new Quaternion().setFromUnitVectors(new Vector3(0,1,0),new Vector3(...n).normalize());
     const f=data.floor.point;
-    this.world.createCollider(RAPIER.ColliderDesc.cuboid(4,.1,4)
+    this.world.createCollider(ColliderDesc.cuboid(4,.1,4)
       .setTranslation(...f.map((v,i)=>v-n[i]*.1)).setRotation(q).setFriction(.65));
     // Invisible boundaries keep the toy within the photographed room.
-    for(const x of [-1.25,1.25]) this.world.createCollider(RAPIER.ColliderDesc.cuboid(.1,3,3).setTranslation(x,0,-5.3).setRestitution(.15));
-    for(const z of [-6.15,-4.68]) this.world.createCollider(RAPIER.ColliderDesc.cuboid(3,3,.1).setTranslation(0,0,z));
-    this.body=this.world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(...data.pivot)
+    for(const x of [-1.25,1.25]) this.world.createCollider(ColliderDesc.cuboid(.1,3,3).setTranslation(x,0,-5.3).setRestitution(.15));
+    for(const z of [-6.15,-4.68]) this.world.createCollider(ColliderDesc.cuboid(3,3,.1).setTranslation(0,0,z));
+    this.body=this.world.createRigidBody(RigidBodyDesc.dynamic().setTranslation(...data.pivot)
       .setLinearDamping(.3).setAngularDamping(.45).setCcdEnabled(true));
-    const hull=RAPIER.ColliderDesc.convexHull(points);
+    const hull=ColliderDesc.convexMesh(new Float32Array(collision.vertices),new Uint32Array(collision.indices));
     if(!hull)throw Error('Could not build head collision hull');
     this.collider=this.world.createCollider(hull.setMass(1).setFriction(.55).setRestitution(.18),this.body);
     this.reset();

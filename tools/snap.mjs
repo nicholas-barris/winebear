@@ -16,6 +16,7 @@ const PROFILE = mkdtempSync("/tmp/scare-bear-chrome-");
 const failures = [];
 const checks = [];
 let failOptionalAssets = false;
+let releasePhysicsHead = null;
 let failHeadMaskOnly = false;
 let failHeadMeshOnly = false;
 let blockedOptionalAssets = 0;
@@ -28,7 +29,7 @@ if (!Number.isFinite(openingHeadDelay) || openingHeadDelay < 0) throw new Error(
 const HEAD_MESH_BINARY = "/assets/head-mesh-packed.bin.gz";
 const HEAD_READY = "!!headDrop && !!headMask && !!headMesh && !!otherHeadScreen && !!otherBodyScreen";
 const HEAD_REST = "!headDrop.active && headDrop.translation.every(v => v === 0) && headDrop.rotation.every((v,i) => v === (i === 3 ? 1 : 0)) && headDrop.angle === 0 && headDrop.alpha === 1";
-const MIME = { ".gz": "application/gzip", ".json": "application/json", ".bin": "application/octet-stream", ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".mp4": "video/mp4" };
+const MIME = { ".wasm": "application/wasm", ".gz": "application/gzip", ".json": "application/json", ".bin": "application/octet-stream", ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".mp4": "video/mp4" };
 const chrome = spawn("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
   "--headless=new", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check",
   "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--user-data-dir=${PROFILE}`,
@@ -70,6 +71,9 @@ listeners.push(async msg => {
   if (msg.method === "Fetch.requestPaused") {
     const url = new URL(msg.params.request.url);
     const file = join(ROOT, url.pathname === "/" ? "index.html" : url.pathname);
+    if (process.env.PHYSICS_LOADING_CHECK && url.pathname === HEAD_MESH_BINARY) {
+      await new Promise(resolve => { releasePhysicsHead = resolve; });
+    }
     if (openingCheck && url.origin === ORIGIN && /^\/assets\/(lamp-mesh\.json|head-drop-physics\.json|head-mesh-packed\.bin\.gz|head-light\.webp|head-color\.webp)$/.test(url.pathname)) {
       await evalJs(`window.__openingMark?.(${JSON.stringify("request:" + url.pathname)})`);
       if (url.pathname === "/assets/lamp-mesh.json") await sleep(1200);
@@ -222,6 +226,24 @@ try {
   await (async () => {
   for (let i = 0; i < 120 && (await evalJs("!!document.getElementById('loading')")); i++) await sleep(250);
   check("scene loaded", await evalJs("!!scene && !document.getElementById('loading')"));
+  if (process.env.PHYSICS_LOADING_CHECK) {
+    check("invitation opens while the head download is held",Boolean(releasePhysicsHead) && await evalJs("!headDrop && headLoading && !!lampMesh"));
+    await pullChain();
+    await evalJs("revealStart=performance.now()-7000;bulbChange.start=performance.now()-7000;nextGlitchAt=Infinity");
+    await waitFor("!!otherHeadScreen",5000);
+    await snap("loading-scene-ready");
+    const hit=await evalJs("otherHeadScreen"); await tap(hit[0],hit[1]);
+    check("early head tap is remembered",await evalJs("Number.isFinite(pendingHeadTap) && !headDrop"));
+    await evalJs("dispatchEvent(new Event('blur'))");
+    check("blur cancels a queued tap",await evalJs("pendingHeadTap === -Infinity"));
+    await tap(hit[0],hit[1]);
+    releasePhysicsHead();
+    check("head becomes usable after background preparation",await waitFor(HEAD_READY,15000));
+    check("queued head tap starts physics",await waitFor("headDrop.active",1500));
+    await snap("loading-head-ready");
+    check("background preparation leaves no GL errors",await evalJs("gl.getError()===gl.NO_ERROR"));
+    return;
+  }
   if (process.env.RENDER_COMPARE) {
     await pullChain();
     await evalJs("window.requestAnimationFrame=()=>0");await sleep(200);
@@ -229,6 +251,7 @@ try {
     await snap("comparison");return;
   }
   if (process.env.PHYSICS_CHECK) {
+    check("head finishes background preparation",await waitFor(HEAD_READY,20000));
     check("Three renderer and Rapier collision hull ready", await evalJs("stage.renderer.isWebGLRenderer && !!headDrop?.body && !!headDrop?.collider && !!lampMesh"));
     await pullChain();
     await evalJs("revealStart=performance.now()-7000; bulbChange.start=performance.now()-7000; nextGlitchAt=Infinity");

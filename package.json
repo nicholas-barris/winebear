@@ -1,12 +1,18 @@
 {
   "name": "winebear",
   "private": true,
-  "description": "Wine Bear Presents: S'Care Bear — tilt-to-look 3D invite",
+  "description": "Wine Bear Presents: S'Care Bear \u2014 tilt-to-look 3D invite",
   "type": "module",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "build:physics": "node tools/build-physics.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@dimforge/rapier3d": "0.21.0",
+    "esbuild": "0.25.12",
+    "three": "0.186.1"
   }
 }

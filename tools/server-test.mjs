@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import {syncBuiltinESMExports} from 'node:module';
+import {Writable} from 'node:stream';
+import {readFileSync,readdirSync} from 'node:fs';
+import {gunzipSync} from 'node:zlib';
+let handler;
+const original=http.createServer;
+http.createServer=fn=>{handler=fn;return{listen(){}}};syncBuiltinESMExports();
+await import('../server.mjs');
+http.createServer=original;syncBuiltinESMExports();
+const wasm=readdirSync(new URL('../public/physics/',import.meta.url)).find(n=>n.endsWith('.wasm'));
+const expected=readFileSync(new URL('../public/physics/'+wasm,import.meta.url));
+async function request(method,headers={}){
+ const chunks=[];let status,responseHeaders;
+ const res=new Writable({write(chunk,encoding,done){chunks.push(Buffer.from(chunk));done();}});
+ res.writeHead=(code,h)=>{status=code;responseHeaders=h;return res;};
+ const done=new Promise((resolve,reject)=>{res.on('finish',resolve);res.on('error',reject)});
+ handler({url:'/physics/'+wasm,method,headers},res);await done;
+ return{status,headers:responseHeaders,body:Buffer.concat(chunks)};
+}
+const raw=await request('GET');assert.equal(raw.status,200);assert.equal(raw.headers['Content-Type'],'application/wasm');assert.deepEqual(raw.body,expected);
+const compressed=await request('GET',{'accept-encoding':'br, gzip'});
+assert.equal(compressed.headers['Content-Encoding'],'gzip');assert.equal(compressed.headers.Vary,'Accept-Encoding');assert.deepEqual(gunzipSync(compressed.body),expected);assert(compressed.body.length<expected.length/2);
+const head=await request('HEAD',{'accept-encoding':'gzip'});assert.equal(head.body.length,0);assert.equal(head.headers['Content-Length'],compressed.body.length);
+assert.equal((await request('HEAD',{'accept-encoding':'gzip;q=0'})).headers['Content-Encoding'],undefined);
+assert.notEqual(raw.headers.ETag,compressed.headers.ETag);
+assert.equal((await request('GET',{'accept-encoding':'gzip','if-none-match':compressed.headers.ETag})).status,304);
+const range=await request('GET',{'accept-encoding':'gzip',range:'bytes=0-99'});assert.equal(range.status,206);assert.deepEqual(range.body,compressed.body.subarray(0,100));
+console.log('PASS: WASM MIME, lossless gzip, HEAD, encoding negotiation, distinct ETags, conditional requests and ranges');

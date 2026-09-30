@@ -1,21 +1,15 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {createHash} from 'node:crypto';
 import {gunzipSync} from 'node:zlib';
-import RAPIER from '../public/vendor/rapier.js';
 const root=new URL('../public/',import.meta.url);
 globalThis.HeadDrop=vm.runInNewContext(readFileSync(new URL('head-drop.js',root),'utf8')+';HeadDrop');
-const {PhysicsHead}=await import('../public/physics/physics-head.js');
-await RAPIER.init();
+const {PhysicsHead,initializePhysics,physicsWasmUrl}=await import('../public/physics/runtime.js');
+await initializePhysics(readFileSync(physicsWasmUrl));
 const data=JSON.parse(readFileSync(new URL('assets/head-drop-physics.json',root)));
-const meta=JSON.parse(readFileSync(new URL('assets/head-mesh-packed.json',root)));
-const bytes=gunzipSync(readFileSync(new URL('assets/head-mesh-packed.bin.gz',root)));
-const cells=new Map();
-for(let i=0;i<meta.vertexCount;i++){
-  const p=[0,1,2].map(j=>meta.positionOffset[j]+bytes.readUInt16LE(i*meta.vertexStride+j*2)/65535*meta.positionScale[j]);
-  cells.set(p.map(v=>Math.round(v/.025)).join(','),p.map((v,j)=>v-meta.pivot[j]));
-}
-const points=new Float32Array([...cells.values()].flat());
+const points=JSON.parse(readFileSync(new URL('physics/assets/head-collider.json',root)));
+assert.equal(points.sourceSha256,createHash('sha256').update(gunzipSync(readFileSync(new URL('assets/head-mesh-packed.bin.gz',root)))).digest('hex'),'precomputed hull must match the shipped head');
 function simulate(fps,drag=false){
   const h=new PhysicsHead(data,false,points);assert(h.play(0));assert(!h.play(1));
   for(let i=1;i<=fps*3;i++){

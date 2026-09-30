@@ -56,7 +56,7 @@ function loadImage(src, signal) {
   });
 }
 
-async function optionalAssets(load, message) {
+async function optionalAssets(load, message, timeout = 12000) {
   const controller = new AbortController();
   let timer;
   try {
@@ -66,7 +66,7 @@ async function optionalAssets(load, message) {
         timer = setTimeout(() => {
           reject(new Error("Optional assets took too long to load"));
           controller.abort();
-        }, 12000);
+        }, timeout);
       }),
     ]);
   } catch (err) {
@@ -102,6 +102,14 @@ let nodStart = -Infinity;
 let characterScreen = null;
 let nodAngle = 0;
 let headDrop = null;
+let headControls = null;
+let headLoading = true;
+let pendingHeadTap = -Infinity;
+function requestHeadDrop(now = performance.now()) {
+  if (headDrop) return headDrop.play(now);
+  if (headLoading && headControls) pendingHeadTap = now;
+  return false;
+}
 let headMask = null;
 let headMesh = null;
 let otherHeadScreen = null;
@@ -314,7 +322,7 @@ function finishGesture(e, cancelled = false) {
   if (g.kind === "head") {
     headDrop.release(performance.now());
   } else if (g.kind === "noah") {
-    if (!cancelled && !g.moved) headDrop?.play(performance.now());
+    if (!cancelled && !g.moved) requestHeadDrop();
   } else if (g.kind === "chain") {
     chain.querySelector(".pull").style.transform = "";
     if (pulled) pull(amount);
@@ -331,7 +339,7 @@ function finishGesture(e, cancelled = false) {
 
 function tapScene(e) {
   if (revealStart === null) { pull(); return; }
-  if (hitsNoah(e.clientX, e.clientY)) { headDrop.play(performance.now()); return; }
+  if (hitsNoah(e.clientX, e.clientY)) { requestHeadDrop(); return; }
   if (hitsLamp(e.clientX, e.clientY)) {
     toggleBulb();
     return;
@@ -514,15 +522,15 @@ function frame(now) {
   characterScreen = [center[0] * innerWidth / canvas.width,
                      innerHeight - center[1] * innerHeight / canvas.height,
                      Math.abs(side[0] - center[0]) * innerWidth / canvas.width];
-  if (headDrop) {
-    const m = headDrop.data;
-    const hit = m.hit.map((v, i) => v + headDrop.translation[i]);
+  if (headDrop || headControls) {
+    const m = headDrop?.data || headControls;
+    const hit = m.hit.map((v, i) => v + (headDrop?.translation[i] || 0));
     const projectHit = (p, radius) => {
       const a = toCanvas(viewProj, p), b = toCanvas(viewProj, [p[0] + radius, p[1], p[2]]);
       return [a[0] * innerWidth / canvas.width, innerHeight - a[1] * innerHeight / canvas.height,
               Math.max(22, Math.abs(b[0] - a[0]) * innerWidth / canvas.width)];
     };
-    otherHeadScreen = headDrop.alpha > 0.1 ? projectHit(hit, m.radius) : null;
+    otherHeadScreen = (headDrop?.alpha ?? 1) > 0.1 ? projectHit(hit, m.radius) : null;
     otherBodyScreen = projectHit(m.bodyHit, m.bodyRadius);
   }
   const power = updateNeon(now);
@@ -583,19 +591,23 @@ async function loadHeadAssets(signal) {
   if (![data.pivot, data.hit, data.bodyHit, data.axis, data.floor?.point, data.floor?.normal].every(p => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite)) ||
       ![data.axis,data.floor.normal].every(p => Math.abs(Math.hypot(...p)-1) < 0.001) ||
       !(data.radius > 0 && data.bodyRadius > 0)) throw new Error("Invalid head reaction controls");
+  headControls = data;
   const metadataResponse = await fetch("assets/head-mesh-packed.json", { signal });
   if (!metadataResponse.ok) throw new Error("Head geometry unavailable");
   const metadata = await metadataResponse.json();
-  const [mask, image, albedo, meshResponse] = await Promise.all([
+  const [mask, image, albedo, meshResponse, collisionResponse] = await Promise.all([
     loadImage("assets/" + data.mask, signal), loadImage("assets/head-light.webp", signal), loadImage("assets/" + metadata.texture.file, signal),
     fetch("assets/" + metadata.binary, { signal }),
+    fetch("physics/assets/head-collider.json", { signal }),
   ]);
+  if (!collisionResponse.ok) throw new Error("Head collider unavailable");
+  const collision = await collisionResponse.json();
   if (!meshResponse.ok) throw new Error("Head geometry unavailable");
   const binary = metadata.compression === "gzip"
     ? await new Response(meshResponse.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
     : await meshResponse.arrayBuffer();
   if (!metadata.pivot.every((v,i) => Math.abs(v-data.pivot[i]) < 0.00001)) throw new Error("Head geometry pivot mismatch");
-  return { data, metadata, mask, image, albedo, binary };
+  return { data, metadata, mask, image, albedo, binary, collision };
 }
 
 async function waitForGpu() {
@@ -623,34 +635,45 @@ async function prepareMeshes() {
     bulbScreen:toCanvas(mul(proj,lookAt(eye,[0,0,-scene.m.focus])),sw.bulb)});
 }
 
+async function initializeHead(assets) {
+  try {
+    const headData = await assets;
+    if (!headData) throw new Error("Head assets unavailable");
+    if (!await window.physicsReady) throw new Error("Physics engine unavailable");
+    const { data, metadata, mask, image, albedo, binary, collision } = headData;
+    const mesh = stage.createHead(metadata, binary, image, albedo);
+    const reaction = new PhysicsHead(data, reducedMotion.matches, collision);
+    if (!reaction.valid) throw new Error("Invalid head reaction animation");
+    await stage.prepareHead();
+    await waitForGpu();
+    const maskTexture = stage.setHeadMask(mask);
+    headMesh = mesh;
+    headMask = maskTexture;
+    reaction.setReduced(reducedMotion.matches);
+    headDrop = reaction;
+    if (!document.hidden && performance.now()-pendingHeadTap < 2500) headDrop.play(performance.now());
+  } catch (err) {
+    headControls = null; otherHeadScreen = null; otherBodyScreen = null;
+    console.warn("The head reaction could not load; the invitation is still ready.", err);
+  } finally { headLoading = false; }
+}
+
 async function main() {
   canvas.style.visibility = "hidden";
-  // Download together, but keep mesh construction and first-use uploads under the loader.
+  // Prioritize the invitation; prepare the optional head offscreen after the first paint.
   const lampAssets = optionalAssets(async signal => {
     const response = await fetch("assets/lamp-mesh.json", { signal });
     if (!response.ok) throw new Error("Lamp mesh unavailable");
     return response.json();
   }, "Using rendered lamp fallback");
-  const headAssets = optionalAssets(loadHeadAssets, "The head reaction could not load; the invitation is still ready.");
+  const headAssets = optionalAssets(loadHeadAssets, "The head reaction could not load; the invitation is still ready.", 60000);
   scene = await loadScene();
   proj = perspective(scene.m.tanX, scene.m.tanY, 0.1, 50);
   swing = await setupSwing(scene.m.motion.lighting);
-  const [lampData, headData] = await Promise.all([lampAssets, headAssets]);
+  const lampData = await lampAssets;
   if (lampData) {
     try { lampMesh = stage.createLamp(lampData); }
     catch (err) { console.warn("Using rendered lamp fallback", err); }
-  }
-  if (headData) {
-    try {
-      const { data, metadata, mask, image, albedo, binary } = headData;
-      const mesh = stage.createHead(metadata, binary, image, albedo);
-      const reaction = new PhysicsHead(data, reducedMotion.matches, mesh.collisionPoints);
-      if (!reaction.valid) throw new Error("Invalid head reaction animation");
-      const maskTexture = stage.setHeadMask(mask);
-      headMesh = mesh;
-      headMask = maskTexture;
-      headDrop = reaction;
-    } catch (err) { console.warn("The head reaction could not load; the invitation is still ready.", err); }
   }
   rsvp.href = PARTIFUL_URL;
   rsvp.hidden = false;
@@ -682,9 +705,9 @@ async function main() {
     }
   }, true);
   const cancelGesture = () => { if (gesture) finishGesture({ pointerId: gesture.id }, true); };
-  addEventListener("blur", () => { cancelGesture(); headDrop?.reset(); });
+  addEventListener("blur", () => { cancelGesture(); headDrop?.reset(); pendingHeadTap = -Infinity; });
   addEventListener("visibilitychange", () => {
-    if (document.hidden) { cancelGesture(); headDrop?.reset(); }
+    if (document.hidden) { cancelGesture(); headDrop?.reset(); pendingHeadTap = -Infinity; }
     lastFrame = 0;
     if (swing) swing.input = null;
     atmosphere?.resetSensor();
@@ -696,6 +719,7 @@ async function main() {
     if (e.matches) firstDustAt = Infinity;
   });
   setupMotion(false);
+  requestAnimationFrame(() => initializeHead(headAssets));
 }
 
 main().catch(err => {
