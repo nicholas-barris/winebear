@@ -14,12 +14,8 @@ const manifest = {
   },
   hotspots: { sign: [135, 429, 918, 404] },
 };
-const spriteMeta = {
-  file: 'spider.webp', cols: 4, rows: 4, frames: 16,
-  frameWidth: 192, frameHeight: 192, fps: 12,
-};
 const canvas = () => ({ width: 390, height: 844, getContext: () => ({}) });
-const make = (reduced = false) => new Atmosphere(canvas(), manifest, spriteMeta, {}, reduced);
+const make = (reduced = false) => new Atmosphere(canvas(), manifest, reduced);
 const context = (started = false) => ({ started, bulbLevel: 1, neonLevel: 1, tiltX: 0, tiltY: 0 });
 const live = effect => effect.particles.filter(p => p.life > 0 && p.age < p.life).length;
 const advance = (effect, from, seconds, started = false) => {
@@ -112,51 +108,29 @@ const reverse = (effect, start, axis = 'gamma') => {
   assert.equal(effect.burstCount, 0, 'first sample after resume only primes sensor history');
 }
 
-// Automatic appearances wait until the invitation has started, then complete.
+// Ambient dust starts with the revealed invitation and remains bounded.
 {
   const effect = make();
-  assert.equal(effect.spider.phase, 'hidden');
   advance(effect, 0, 30, false);
-  assert.equal(effect.spider.phase, 'hidden', 'no automatic spider before reveal');
-  let now = 31000;
-  effect.update(now, 1 / 60, context(true));
-  assert.ok(Number.isFinite(effect.nextSpiderAt), 'reveal schedules a finite automatic appearance');
-  let appeared = effect.spider.phase !== 'hidden';
-  for (let i = 0; i < 60 * 10 && !appeared; i++) {
-    now += 1000 / 60;
-    effect.update(now, 1 / 60, context(true));
-    appeared = effect.spider.phase !== 'hidden';
+  assert.equal(live(effect), 0, 'no ambient particles before reveal');
+  effect.update(31000, 1 / 60, context(true));
+  assert.ok(live(effect) > 0, 'reveal permits ambient particles');
+  for (let i = 1; i <= 60 * 30; i++) {
+    effect.update(31000 + i * 1000 / 60, 1 / 60, context(true));
+    assert.ok(live(effect) <= 10, 'ambient dust stays subtle and bounded');
   }
-  assert.ok(appeared, 'automatic spider eventually appears after reveal');
-  let finished = false;
-  for (let i = 0; i < 60 * 6 && !finished; i++) {
-    now += 1000 / 60;
-    effect.update(now, 1 / 60, context(true));
-    finished = effect.spider.phase === 'hidden';
-  }
-  assert.ok(finished, 'automatic spider eventually returns to hiding');
+  advance(effect, 61000, 5, false);
+  assert.equal(live(effect), 0, 'ambient dust expires when the scene stops');
 }
-
-// Tapping an active spider retreats once; repeated requests do not prolong it.
 {
   const effect = make();
-  assert.equal(effect.startSpider(1000), true);
-  assert.notEqual(effect.spider.phase, 'hidden');
-  assert.equal(effect.startSpider(1010), false, 'active spider cannot be restarted');
-  effect.retreat(1100);
-  assert.equal(effect.spider.phase, 'retreating');
-  let now = 1100;
-  for (let i = 0; i < 60 * 10 && effect.spider.phase !== 'hidden'; i++) {
-    now += 1000 / 60;
-    effect.retreat(now);
-    effect.update(now, 1 / 60, context(false));
+  for (let i = 0; i < 60 * 5; i++) {
+    effect.update(i * 1000 / 60, 1 / 60, { ...context(true), bulbLevel: 0 });
   }
-  assert.equal(effect.spider.phase, 'hidden', 'repeated taps cannot keep retreat restarting');
-  effect.retreat(now + 20);
-  assert.equal(effect.spider.phase, 'hidden', 'hidden spider ignores retreat');
+  assert.equal(live(effect), 0, 'unlit bulb does not generate ambient motes');
 }
 
-// Reduced motion suppresses ambient/shake effects while preserving explicit play.
+// Reduced motion suppresses dust and shake effects, including live changes.
 {
   const effect = make(true);
   assert.equal(effect.reduced, true);
@@ -165,26 +139,17 @@ const reverse = (effect, start, axis = 'gamma') => {
   advance(effect, 3000, 60, true);
   assert.equal(effect.burstCount, 0);
   assert.equal(live(effect), 0, 'reduced motion never creates automatic motes');
-  assert.equal(effect.spider.phase, 'hidden');
-  assert.equal(effect.startSpider(65000), false, 'automatic appearance respects reduced motion');
-  assert.equal(effect.startSpider(65000, true), true, 'explicit prop interaction remains available');
-  assert.notEqual(effect.spider.phase, 'hidden');
-  effect.retreat(65100);
-  advance(effect, 65100, 10);
-  assert.equal(effect.spider.phase, 'hidden');
 }
 {
   const effect = make();
   effect.emit(1000);
-  effect.startSpider(1000);
   effect.setReduced(true);
   assert.equal(effect.reduced, true);
   assert.equal(live(effect), 0, 'changing preference immediately clears particles');
-  assert.equal(effect.spider.phase, 'hidden', 'changing preference immediately hides automatic prop');
   assert.equal(effect.emit(3000), false);
   effect.setReduced(false);
   assert.equal(effect.reduced, false);
   assert.equal(effect.emit(4000), true, 'effects can resume after preference changes back');
 }
 
-console.log('PASS: fixed particle pool, expiry, puff/shake cooldowns, sensor discontinuities, spider lifecycle, reduced motion');
+console.log('PASS: fixed particle pool, expiry, puff/shake cooldowns, sensor discontinuities, ambient dust, reduced motion');

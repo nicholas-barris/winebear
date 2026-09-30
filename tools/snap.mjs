@@ -1,11 +1,13 @@
 // Headless check: serves public/ on a fake https origin via CDP, emulates a phone,
 // waits for load, and screenshots the reveal and tilt. Usage: node tools/snap.mjs [outDir]
+// Opening race check: OPENING_CHECK=1 OPENING_HEAD_DELAY=2000 node tools/snap.mjs screenshots/opening
+// Stalled optional download: OPENING_STALLED_HEAD=1 node tools/snap.mjs screenshots/opening-stalled
 import { spawn } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
+const ROOT = process.env.ASSET_ROOT || join(dirname(fileURLToPath(import.meta.url)), "..", "public");
 const OUT = process.argv[2] || "/tmp/scare-bear-snaps";
 const ORIGIN = "https://scarebear.test";
 mkdirSync(OUT, { recursive: true });
@@ -18,6 +20,11 @@ let failHeadMaskOnly = false;
 let failHeadMeshOnly = false;
 let blockedOptionalAssets = 0;
 const blockedAssetPaths = new Set();
+const openingInstrumentation = new Set();
+const openingCheck = Boolean(process.env.OPENING_CHECK || process.env.OPENING_STALLED_HEAD);
+let openingHeadHeld = false;
+const openingHeadDelay = Number(process.env.OPENING_HEAD_DELAY || 0);
+if (!Number.isFinite(openingHeadDelay) || openingHeadDelay < 0) throw new Error("OPENING_HEAD_DELAY must be nonnegative milliseconds");
 const HEAD_MESH_BINARY = "/assets/head-mesh-packed.bin.gz";
 const HEAD_READY = "!!headDrop && !!headMask && !!headMesh && !!otherHeadScreen && !!otherBodyScreen";
 const HEAD_REST = "!headDrop.active && headDrop.translation.every(v => v === 0) && headDrop.rotation.every((v,i) => v === (i === 3 ? 1 : 0)) && headDrop.angle === 0 && headDrop.alpha === 1";
@@ -63,17 +70,48 @@ listeners.push(async msg => {
   if (msg.method === "Fetch.requestPaused") {
     const url = new URL(msg.params.request.url);
     const file = join(ROOT, url.pathname === "/" ? "index.html" : url.pathname);
-    if (url.origin === ORIGIN && ((failOptionalAssets && /^\/assets\/(spider\.(json|webp)|lamp-mesh\.json|head-drop-physics\.json|head-mask\.png|head-mesh(-packed)?\.(json|bin(\.gz)?)|head-(color|light)\.(png|webp))$/.test(url.pathname)) ||
+    if (openingCheck && url.origin === ORIGIN && /^\/assets\/(lamp-mesh\.json|head-drop-physics\.json|head-mesh-packed\.bin\.gz|head-light\.webp|head-color\.webp)$/.test(url.pathname)) {
+      await evalJs(`window.__openingMark?.(${JSON.stringify("request:" + url.pathname)})`);
+      if (url.pathname === "/assets/lamp-mesh.json") await sleep(1200);
+      if (url.pathname === HEAD_MESH_BINARY && process.env.OPENING_STALLED_HEAD) {
+        openingHeadHeld = true;
+        await evalJs('window.__openingMark("head-binary-stalled")');
+        return; // Keep CDP interception pending; only the app's timeout can release its loader.
+      }
+      if (url.pathname === HEAD_MESH_BINARY && openingHeadDelay) await sleep(openingHeadDelay);
+    }
+    if (url.origin === ORIGIN && ((failOptionalAssets && /^\/assets\/(lamp-mesh\.json|head-drop-physics\.json|head-mask\.png|head-mesh(-packed)?\.(json|bin(\.gz)?)|head-(color|light)\.(png|webp))$/.test(url.pathname)) ||
         (failHeadMaskOnly && url.pathname === "/assets/head-mask.png") ||
         (failHeadMeshOnly && url.pathname === HEAD_MESH_BINARY))) {
       blockedOptionalAssets++;
       blockedAssetPaths.add(url.pathname);
       await S("Fetch.fulfillRequest", { requestId: msg.params.requestId, responseCode: 404, body: "" });
     } else if (url.origin === ORIGIN && existsSync(file)) {
+      let body = readFileSync(file);
+      if (openingCheck && url.pathname === "/main.js") {
+        let source = body.toString();
+        for (const name of ["LampMesh","HeadMesh"]) {
+          const constructor = new RegExp(`new ${name}\\(([^;]+?)\\)`);
+          source = source.replace(constructor,(call) => {
+            openingInstrumentation.add(name);
+            const label = name === "LampMesh" ? "lamp-gpu" : "head-gpu";
+            return `(() => { window.__openingMark("${label}-start"); const result = ${call}; window.__openingMark("${label}-end"); return result; })()`;
+          });
+        }
+        if (source.includes("loadingEl.remove()")) {
+          source = source.replace("loadingEl.remove()",'window.__openingMark("loading-removed"); loadingEl.remove()');
+          openingInstrumentation.add("loading");
+        }
+        if (source.includes("revealStart = now;")) {
+          source = source.replace("revealStart = now;",'revealStart = now; window.__openingMark("reveal-start");');
+          openingInstrumentation.add("reveal");
+        }
+        body = Buffer.from(source);
+      }
       await S("Fetch.fulfillRequest", {
         requestId: msg.params.requestId, responseCode: 200,
         responseHeaders: [{ name: "Content-Type", value: MIME[extname(file)] || "application/octet-stream" }],
-        body: readFileSync(file).toString("base64"),
+        body: body.toString("base64"),
       });
     } else {
       await S("Fetch.fulfillRequest", { requestId: msg.params.requestId, responseCode: 404, body: "" });
@@ -86,6 +124,36 @@ listeners.push(async msg => {
 await S("Fetch.enable", { patterns: [{ urlPattern: `${ORIGIN}/*` }] });
 await S("Runtime.enable");
 await S("Page.enable");
+if (openingCheck) await S("Page.addScriptToEvaluateOnNewDocument", {source:`
+  window.__opening = {events:[],frames:[]};
+  window.__openingMark = name => {
+    window.__opening.events.push({name,time:performance.now()});
+  };
+  const originalFetch = window.fetch;
+  window.fetch = function(input,init) {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.endsWith('head-mesh-packed.bin.gz') && init?.signal) {
+      init.signal.addEventListener('abort',() => window.__openingMark('head-binary-aborted'),{once:true});
+    }
+    return originalFetch.call(this,input,init);
+  };
+  addEventListener('DOMContentLoaded',() => {
+    let previous = null;
+    function observe(now) {
+      try {
+        if (typeof scene !== 'undefined' && scene && typeof swing !== 'undefined' && swing && !document.getElementById('loading')) {
+          window.__opening.frames.push({time:now,observedAt:performance.now(),interval:previous === null ? null : now-previous,
+            lamp:lampMesh ? 'mesh':'fallback',headReady:!!headMesh,dprCap,
+            canvasWidth:canvas.width,canvasHeight:canvas.height,
+            bulbLevel:bulbLevelAt(now),lampAngle:swing.angle});
+          previous = now;
+        }
+      } catch {}
+      if (window.__opening.frames.length < 1200) requestAnimationFrame(observe);
+    }
+    requestAnimationFrame(observe);
+  });
+`});
 const [VW, VH] = (process.env.VIEWPORT || "393x852").split("x").map(Number);
 await S("Emulation.setDeviceMetricsOverride", { width: VW, height: VH, deviceScaleFactor: 2, mobile: true });
 await S("Emulation.setTouchEmulationEnabled", { enabled: true });
@@ -141,18 +209,6 @@ async function neutral() {
   await evalJs("Object.assign(tilt, {x: 0, y: 0, tx: 0, ty: 0, lastInput: performance.now()})");
   await sleep(100);
 }
-async function parkSpider() {
-  // Advance the prop's own timestamps, then let the real frame project its hit area.
-  await evalJs(`(() => {
-    const now = performance.now();
-    const context = {started: false, bulbLevel: 1, neonLevel: 1, tiltX: 0, tiltY: 0};
-    atmosphere.retreat(now);
-    atmosphere.update(now + 1000, 0, context);
-    atmosphere.startSpider(now - 1500, true);
-    atmosphere.update(now, 0, context);
-  })()`);
-  await sleep(80);
-}
 async function uncovered() {
   return evalJs(`new Promise(resolve => requestAnimationFrame(() => {
     const pixels = new Uint8Array(canvas.width * canvas.height * 4);
@@ -166,7 +222,55 @@ try {
   await (async () => {
   for (let i = 0; i < 120 && (await evalJs("!!document.getElementById('loading')")); i++) await sleep(250);
   check("scene loaded", await evalJs("!!scene && !document.getElementById('loading')"));
-  check("no atmosphere before initial reveal", await evalJs("!!atmosphere && atmosphere.burstCount === 0 && atmosphere.particles.every(p => p.age >= p.life) && atmosphere.spider.phase === 'hidden'"));
+  if (openingCheck) {
+    check("opening mesh and lifecycle instrumentation installed",["LampMesh","HeadMesh","loading","reveal"].every(name=>openingInstrumentation.has(name)));
+    await pullChain();
+    const openingStart = await evalJs("revealStart");
+    await snap("opening-00-first-tap");
+    for (const [seconds,name] of [[0.6,"opening-01-neon"],[1.3,"opening-02-lamp-ready"],[2.03,"opening-03-bulb-first"],[2.35,"opening-04-bulb-steady"],[5.9,"opening-05-complete"]]) {
+      const remaining = await evalJs(`${openingStart} + ${seconds*1000} - performance.now()`);
+      if (remaining > 0) await sleep(remaining);
+      await snap(name);
+    }
+    await sleep(1200);
+    const opening = await evalJs("window.__opening");
+    const loadingAt = opening.events.find(event=>event.name === "loading-removed")?.time;
+    const revealAt = opening.events.find(event=>event.name === "reveal-start")?.time;
+    const lampReadyAt = opening.events.find(event=>event.name === "lamp-gpu-end")?.time;
+    const headStartAt = opening.events.find(event=>event.name === "head-gpu-start")?.time;
+    const headEndAt = opening.events.find(event=>event.name === "head-gpu-end")?.time;
+    const rendererChanges = opening.frames.filter((frame,i)=>i && frame.lamp !== opening.frames[i-1].lamp);
+    const introFrames = opening.frames.filter(frame=>frame.time >= revealAt && frame.time <= revealAt+5800);
+    const intervals = introFrames.map(frame=>frame.interval).filter(Number.isFinite).sort((a,b)=>a-b);
+    const report = {...opening,sourceRoot:ROOT,delayedLampMs:1200,delayedHeadMs:openingHeadDelay,stalledHead:Boolean(process.env.OPENING_STALLED_HEAD),loadingAt,revealAt,lampReadyAt,headStartAt,headEndAt,
+      headConstructionMs:Number.isFinite(headEndAt-headStartAt) ? headEndAt-headStartAt : null,
+      rendererChanges,introFrames:introFrames.length,
+      introMaxIntervalMs:intervals.at(-1) ?? null,introP95IntervalMs:intervals[Math.floor(intervals.length*0.95)] ?? null,
+      introIntervalsAbove50Ms:intervals.filter(ms=>ms>50).length};
+    writeFileSync(join(OUT,"opening-check.json"),JSON.stringify(report,null,2));
+    console.log("opening summary",JSON.stringify({loadingAt,revealAt,lampReadyAt,headStartAt,headEndAt,
+      headConstructionMs:report.headConstructionMs,rendererChanges,
+      introMaxIntervalMs:report.introMaxIntervalMs,introP95IntervalMs:report.introP95IntervalMs}));
+    check("lamp renderer is ready before invitation opens",Number.isFinite(lampReadyAt) && lampReadyAt <= loadingAt);
+    check("lamp renderer never swaps after invitation opens",rendererChanges.length === 0 && opening.frames[0]?.lamp === "mesh",rendererChanges);
+    check("heavy head preparation stays outside opening reveal",!Number.isFinite(headStartAt) || headStartAt < revealAt || headStartAt >= revealAt+5800,
+      {headStartAt,revealAt,headConstructionMs:report.headConstructionMs});
+    if (!process.env.OPENING_STALLED_HEAD) {
+      check("head renderer initializes before invitation opens",Number.isFinite(headEndAt) && headEndAt <= loadingAt && await evalJs(HEAD_READY),{headEndAt,loadingAt});
+    }
+    if (process.env.OPENING_STALLED_HEAD) {
+      const headRequestedAt = opening.events.find(event=>event.name === "request:/assets/head-drop-physics.json")?.time;
+      const headAbortedAt = opening.events.find(event=>event.name === "head-binary-aborted")?.time;
+      check("stalled head download was held and aborted",openingHeadHeld && Number.isFinite(headAbortedAt));
+      check("stalled optional download respects the bounded production wait",headAbortedAt-headRequestedAt >= 11000 && headAbortedAt-headRequestedAt < 16000 && loadingAt-headAbortedAt < 5000,
+        {headRequestedAt,headAbortedAt,loadingAt});
+      check("stalled head keeps original characters with no later GPU setup",!Number.isFinite(headStartAt) && await evalJs("!headDrop && !headMask && !headMesh && scene.layers.some(layer=>layer.name === 'chars')"));
+      check("opening and RSVP remain available with a stalled head download",await evalJs("revealStart !== null && neonOn && bulbOn && rsvp.classList.contains('on') && getComputedStyle(rsvp).pointerEvents === 'auto' && rsvp.href.includes('partiful.com')"));
+    }
+    check("opening leaves no WebGL errors",await evalJs("gl.getError() === gl.NO_ERROR"));
+    return;
+  }
+  check("no dust before initial reveal", await evalJs("!!atmosphere && atmosphere.burstCount === 0 && atmosphere.particles.every(p => p.age >= p.life)"));
   if (process.env.MAGENTA) await evalJs("gl.clearColor(1, 0, 1, 1)");
   await snap("0-dark");
   await pullChain();
@@ -387,8 +491,8 @@ try {
     return;
   }
   if (process.env.VISUAL_ONLY) {
-    await evalJs("nextGlitchAt = performance.now() + 60000; glitch = null; atmosphere.startSpider(performance.now(), true)");
-    await sleep(1550);
+    await evalJs("nextGlitchAt = performance.now() + 60000; glitch = null; atmosphere.emit(performance.now())");
+    await sleep(220);
     await snap("11-atmosphere");
     for (const [name, x, y] of [["left", -1, 0], ["right", 1, 0]]) {
       await evalJs(`Object.assign(tilt,{x:${x},tx:${x},y:${y},ty:${y},lastInput:performance.now()})`);
@@ -599,34 +703,14 @@ try {
   check("WebGL has no errors", await evalJs("gl.getError() === gl.NO_ERROR"));
   await neutral();
   await snap("7-final");
-  // New atmosphere interactions use the real touch handlers and projected hit areas.
-  for (let i = 0; i < 40 && !(await evalJs("!!atmosphere.spriteImage")); i++) await sleep(100);
-  check("Blender spider sprite loaded", await evalJs("!!atmosphere.spriteImage && !!atmosphere.spriteMeta"));
-  await evalJs(`(() => {
-    const now = performance.now();
-    atmosphere.retreat(now);
-    atmosphere.update(now + 1000, 0, {started: false, bulbLevel: 1, neonLevel: 1, tiltX: 0, tiltY: 0});
-  })()`);
+  // Dust interactions use the real sign touch target.
   await sleep(750);
   const beforeSignPuff = await evalJs("atmosphere.burstCount");
   const signPoint = await evalJs("[(signScreen[0]+signScreen[2])/2, (signScreen[1]+signScreen[3])/2]");
   await tap(...signPoint);
   check("projected sign tap releases one dust puff", await evalJs(`atmosphere.burstCount === ${beforeSignPuff + 1}`));
-  check("sign tap starts manual spider", await evalJs("atmosphere.spider.phase === 'descending' && atmosphere.spider.manual"));
-  await parkSpider();
-  check("spider has a projected touch target", await evalJs("atmosphere.spiderScreen?.length === 3 && atmosphere.hits(atmosphere.spiderScreen[0] + 21, atmosphere.spiderScreen[1])"));
   await sleep(220);
   await snap("11-atmosphere");
-  const lightsBeforeSpider = await evalJs("[bulbOn, neonOn]");
-  await tap(...await evalJs("atmosphere.spiderScreen.slice(0,2)"));
-  check("spider tap retreats without changing lights", await evalJs(`atmosphere.spider.phase === 'retreating' && !gesture && JSON.stringify([bulbOn,neonOn]) === '${JSON.stringify(lightsBeforeSpider)}'`));
-  await sleep(950);
-  check("spider finishes retreat", await evalJs("atmosphere.spider.phase === 'hidden' && !atmosphere.spiderScreen"));
-  await parkSpider();
-  await drag(...await evalJs("atmosphere.spiderScreen.slice(0,2)"), 0, 55, async () => {
-    check("spider gesture takes priority over room and lamp", await evalJs("gesture?.kind === 'spider'"));
-  }, true);
-  check("cancelled spider drag leaves lights alone", await evalJs(`!gesture && atmosphere.spider.phase === 'waiting' && JSON.stringify([bulbOn,neonOn]) === '${JSON.stringify(lightsBeforeSpider)}'`));
   check("repeated dust bursts keep the fixed pool bounded", await evalJs(`(() => {
     const pool = atmosphere.particles, now = performance.now() + 1000;
     for (let i = 0; i < 12; i++) atmosphere.emit(now + i * 701);
@@ -634,10 +718,9 @@ try {
   })()`));
   await S("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   await sleep(150);
-  check("live reduced-motion preference clears active effects", await evalJs("atmosphere.reduced && atmosphere.particles.every(p => p.age >= p.life) && atmosphere.spider.phase === 'hidden' && !atmosphere.spiderScreen"));
-  await evalJs("atmosphere.nextSpiderAt = performance.now() - 1");
+  check("live reduced-motion preference clears active dust", await evalJs("atmosphere.reduced && atmosphere.particles.every(p => p.age >= p.life)"));
   await sleep(900);
-  check("reduced motion prevents ambient motes and automatic spider", await evalJs("atmosphere.particles.every(p => p.age >= p.life) && atmosphere.spider.phase === 'hidden'"));
+  check("reduced motion prevents ambient dust", await evalJs("atmosphere.particles.every(p => p.age >= p.life)"));
   await S("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   await sleep(100);
   check("live motion preference can be restored", await evalJs("!atmosphere.reduced"));
@@ -668,7 +751,7 @@ try {
   await sleep(100);
   await drag(...await lampPoint(), 0, 55);
   check("first cord drag starts reveal", await evalJs("revealStart !== null && neonOn && bulbOn"));
-  // The optional sprite must never make a failed request fatal to the invitation.
+  // Optional lamp and head assets must never make a failed request fatal to the invitation.
   failOptionalAssets = true;
   await S("Page.reload", { ignoreCache: true });
   for (let i = 0; i < 120; i++) {
@@ -676,15 +759,15 @@ try {
     if (await evalJs("typeof scene !== 'undefined' && !!scene && !document.getElementById('loading')")) break;
   }
   for (let i = 0; i < 20 && !blockedOptionalAssets; i++) await sleep(100);
-  check("optional spider asset failure was exercised", blockedOptionalAssets > 0);
-  check("missing spider asset leaves scene and dust ready", await evalJs("!!scene && !!atmosphere && !atmosphere.spriteImage && !document.getElementById('loading')"));
+  check("optional mesh asset failure was exercised", blockedOptionalAssets > 0);
+  check("missing optional meshes leave scene and dust ready", await evalJs("!!scene && !!atmosphere && !document.getElementById('loading')"));
   check("missing lamp mesh keeps rendered lamp fallback", await evalJs("!lampMesh && scene.layers.some(layer => layer.name === 'lamp')"));
   check("missing head clip keeps original characters", blockedAssetPaths.has("/assets/head-drop-physics.json") && await evalJs("!headDrop && !headMask && !headMesh && scene.layers.some(layer => layer.name === 'chars')"));
   await pullChain();
-  check("reveal works without spider asset", await evalJs("revealStart !== null && neonOn && bulbOn"));
+  check("reveal works without optional meshes", await evalJs("revealStart !== null && neonOn && bulbOn"));
   await evalJs("revealStart = performance.now() - 7000");
   await sleep(150);
-  check("RSVP remains available without spider asset", await evalJs("rsvp.classList.contains('on') && getComputedStyle(rsvp).pointerEvents === 'auto' && rsvp.href.includes('partiful.com')"));
+  check("RSVP remains available without optional meshes", await evalJs("rsvp.classList.contains('on') && getComputedStyle(rsvp).pointerEvents === 'auto' && rsvp.href.includes('partiful.com')"));
   check("optional asset fallbacks leave no WebGL errors", await evalJs("gl.getError() === gl.NO_ERROR"));
   // Fail the mesh binary independently, after valid physics and mesh metadata loads.
   failOptionalAssets = false;

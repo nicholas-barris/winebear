@@ -32,4 +32,4 @@ blender --background blender/source.blend --python blender/animate_head_prototyp
 
 ## Other props
 
-`create_lamp.py` creates the separate `lamp-prototype.blend` and browser lamp mesh. `create_spider.py` creates `spider-prototype.blend` and the spider animation assets. These also leave the original scene untouched.
+`create_lamp.py` creates the separate `lamp-prototype.blend` and browser lamp mesh. The retired `create_spider.py` generator and local `spider-prototype.blend` remain available for authoring reference; the invitation no longer includes the spider. These leave the original scene untouched.

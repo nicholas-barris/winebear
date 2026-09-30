@@ -1,28 +1,21 @@
 "use strict";
 
 class Atmosphere {
-  constructor(canvas, manifest, spriteMeta, spriteImage, reduced = false) {
+  constructor(canvas, manifest, reduced = false) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
-    this.spriteMeta = spriteMeta;
-    this.spriteImage = spriteImage;
     this.reduced = reduced;
     this.particles = Array.from({ length: 64 }, () => ({ life: 0, age: 0 }));
     this.burstCount = 0;
     this.lastBurst = -Infinity;
     this.lastShake = -Infinity;
     this.nextMoteAt = 0;
-    this.nextSpiderAt = Infinity;
-    this.started = false;
-    this.spider = { phase: "hidden", start: 0, drop: 0, from: 0, manual: false };
-    this.spiderScreen = null;
     const { width, height, tanX, tanY, chain, hotspots } = manifest;
     const [x, y, w, h] = hotspots.sign;
     const z = -chain.anchor[2];
     this.edge = [(2 * (x + w / 2) / width - 1) * tanX * z,
                  (1 - 2 * (y + h) / height) * tanY * z, -z];
     this.spread = w / width * tanX * z * 0.9;
-    this.anchor = [(2 * (x + w * 0.14) / width - 1) * tanX * z, this.edge[1], -z];
     this.down = chain.down;
     this.resetSensor();
   }
@@ -93,42 +86,11 @@ class Atmosphere {
     this.resetSensor();
     if (value) {
       for (const p of this.particles) p.life = 0;
-      this.spider.phase = "hidden";
-      this.spiderScreen = null;
     }
-    this.nextSpiderAt = Infinity;
-    this.started = false;
-  }
-
-  startSpider(now, manual = false) {
-    if (!this.spriteImage || this.spider.phase !== "hidden" || (this.reduced && !manual)) return false;
-    Object.assign(this.spider, { phase: this.reduced ? "waiting" : "descending", start: now,
-      drop: this.reduced ? 1 : 0, from: 0, manual });
-    this.nextSpiderAt = now + 20000;
-    return true;
-  }
-
-  retreat(now) {
-    const s = this.spider;
-    if (s.phase === "hidden" || s.phase === "retreating") return false;
-    if (this.reduced) { s.phase = "hidden"; this.spiderScreen = null; return true; }
-    s.phase = "retreating";
-    s.from = s.drop;
-    s.start = now;
-    return true;
-  }
-
-  hits(x, y) {
-    const hit = this.spiderScreen;
-    return !!hit && this.spider.phase !== "hidden" && Math.hypot(x - hit[0], y - hit[1]) <= Math.max(22, hit[2] * 0.44);
   }
 
   update(now, dt, context) {
     dt = Math.min(Math.max(dt, 0), 0.05);
-    if (context.started && !this.started && !this.reduced) {
-      this.started = true;
-      this.nextSpiderAt = now + 8000;
-    }
     if (!this.reduced) {
       for (const p of this.particles) {
         if (p.age >= p.life) continue;
@@ -144,25 +106,12 @@ class Atmosphere {
         if (p && motes < 10) this.seed(p, true);
         this.nextMoteAt = now + 360;
       }
-      if (context.started && this.spriteImage && now >= this.nextSpiderAt) this.startSpider(now);
-    }
-    const s = this.spider, elapsed = now - s.start;
-    if (s.phase === "descending") {
-      const t = Math.min(1, elapsed / 1400);
-      s.drop = 1 - (1 - t) ** 3;
-      if (t === 1) { s.phase = "waiting"; s.start = now; }
-    } else if (s.phase === "waiting" && !this.reduced && elapsed >= 3000) this.retreat(now);
-    else if (s.phase === "retreating") {
-      const t = Math.min(1, elapsed / 850);
-      s.drop = s.from * (1 - t * t);
-      if (t === 1) { s.phase = "hidden"; this.spiderScreen = null; this.nextSpiderAt = now + 20000; }
     }
   }
 
   draw(now, context) {
     const c = this.ctx;
     c.clearRect(0, 0, this.width, this.height);
-    this.spiderScreen = null;
     if (!context.project || !context.signScreen) return;
     const top = context.signScreen[3];
     c.save();
@@ -180,28 +129,6 @@ class Atmosphere {
       c.beginPath();
       c.arc(x, y, p.size, 0, Math.PI * 2);
       c.fill();
-    }
-    const s = this.spider, meta = this.spriteMeta;
-    if (s.phase !== "hidden" && this.spriteImage && meta) {
-      const drop = 0.05 + s.drop * 0.27;
-      const p = this.anchor.map((v, i) => v + this.down[i] * drop);
-      if (!this.reduced) p[0] += Math.sin(now / 530) * 0.012 * s.drop;
-      const a = context.project(this.anchor), b = context.project(p);
-      const side = context.project([p[0] + 0.17, p[1], p[2]]);
-      const size = Math.max(22, Math.min(38, Math.abs(side[0] - b[0])));
-      c.globalAlpha = 0.15;
-      c.strokeStyle = "#d5c4a2";
-      c.lineWidth = 0.65;
-      c.beginPath();
-      c.moveTo(...a);
-      c.lineTo(b[0], b[1] - size * 0.214);
-      c.stroke();
-      const frame = this.reduced ? 0 : Math.floor(now / 1000 * meta.fps) % meta.frames;
-      c.globalAlpha = Math.min(1, 0.65 + context.bulbLevel * 0.35 + context.neonLevel * 0.15);
-      c.drawImage(this.spriteImage, frame % meta.cols * meta.frameWidth,
-        Math.floor(frame / meta.cols) * meta.frameHeight, meta.frameWidth, meta.frameHeight,
-        b[0] - size / 2, b[1] - size / 2, size, size);
-      if (b[1] > top + size * 0.15 && b[1] < context.maxY - size / 2) this.spiderScreen = [b[0], b[1], size];
     }
     c.restore();
   }

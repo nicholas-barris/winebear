@@ -45,14 +45,17 @@ class LampMesh {
           float strip = pow(max(dot(reflection,normalize(vec3(0.65,0.1,1.0))),0.0),160.0);
           float sign = pow(max(dot(reflection,normalize(vec3(-0.15,0.85,0.4))),0.0),24.0);
           float fresnel = 0.035 + 0.965*pow(1.0-facing,5.0);
-          vec3 reflected = vec3(0.95,0.87,0.72)*softbox*illumination*0.85;
-          reflected += vec3(0.50,0.42,0.32)*strip*illumination*0.28;
+          float glassLight = illumination*mix(0.06,1.0,uBulbLevel);
+          vec3 reflected = vec3(0.95,0.87,0.72)*softbox*glassLight*0.85;
+          reflected += vec3(0.50,0.42,0.32)*strip*glassLight*0.28;
           reflected += warm*sign*uNeonLevel*0.16;
-          reflected += vec3(0.16,0.15,0.12)*fresnel*(0.2+illumination);
+          float rimLight = mix(sign*uNeonLevel*0.025,0.2+illumination,uBulbLevel);
+          reflected += vec3(0.16,0.15,0.12)*fresnel*rimLight;
           float radius = length(cross(vPosition-uBulb,v));
           float core = exp(-radius*radius/0.0012);
           reflected += (vec3(1.0,0.84,0.46)*core*0.55 + vec3(1.0,0.98,0.87)*pow(core,3.0)*0.5)*uBulbLevel;
-          float opacity = 0.025 + fresnel*0.16 + softbox*illumination*0.22;
+          float opacity = mix(0.002+sign*uNeonLevel*0.012,
+            0.025+fresnel*0.16+softbox*illumination*0.22,uBulbLevel);
           outColor = vec4(reflected,opacity);
           return;
         }

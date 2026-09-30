@@ -206,30 +206,44 @@ gl.bindVertexArray(null);
 
 // ---- assets -----------------------------------------------------------------
 
-function loadImage(src) {
+function loadImage(src, signal) {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("failed to load " + src));
+    const abort = () => { img.src = ""; reject(new Error("cancelled image " + src)); };
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    img.onload = () => { cleanup(); resolve(img); };
+    img.onerror = () => { cleanup(); reject(new Error("failed to load " + src)); };
+    if (signal?.aborted) return abort();
+    signal?.addEventListener("abort", abort, { once: true });
     img.src = src;
   });
 }
 
+async function optionalAssets(load, message) {
+  const controller = new AbortController();
+  let timer;
+  try {
+    return await Promise.race([
+      load(controller.signal),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("Optional assets took too long to load"));
+          controller.abort();
+        }, 12000);
+      }),
+    ]);
+  } catch (err) {
+    controller.abort();
+    console.warn(message, err);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function setupAtmosphere() {
-  // The prop is optional: dust and the invitation work while it loads or if it fails.
   if (typeof Atmosphere === "undefined") return;
-  atmosphere = new Atmosphere(atmosphereCanvas, scene.m, null, null, reducedMotion.matches);
-  fetch("assets/spider.json")
-    .then(response => {
-      if (!response.ok) throw new Error("failed to load spider metadata");
-      return response.json();
-    })
-    .then(async metadata => {
-      const sprite = await loadImage("assets/" + metadata.file);
-      atmosphere.spriteMeta = metadata;
-      atmosphere.spriteImage = sprite;
-    })
-    .catch(err => console.warn("The spider could not load; the invitation is still ready.", err));
+  atmosphere = new Atmosphere(atmosphereCanvas, scene.m, reducedMotion.matches);
 }
 
 function texture(img, { mipmaps = false, premultiply = false, nearest = false } = {}) {
@@ -555,10 +569,8 @@ function finishGesture(e, cancelled = false) {
   canvas.style.cursor = "";
   const amount = Math.min(24, Math.max(0, g.dy) * 0.45);
   const pulled = !cancelled && g.dy >= PULL_DISTANCE && g.dy > Math.abs(g.dx);
-  if (cancelled || g.moved || g.kind === "spider" || g.kind === "noah") suppressClickUntil = performance.now() + 500;
-  if (g.kind === "spider") {
-    if (!cancelled && !g.moved) atmosphere?.retreat(performance.now());
-  } else if (g.kind === "noah") {
+  if (cancelled || g.moved || g.kind === "noah") suppressClickUntil = performance.now() + 500;
+  if (g.kind === "noah") {
     if (!cancelled && !g.moved) headDrop?.play(performance.now());
   } else if (g.kind === "chain") {
     chain.querySelector(".pull").style.transform = "";
@@ -575,10 +587,6 @@ function finishGesture(e, cancelled = false) {
 }
 
 function tapScene(e) {
-  if (atmosphere?.hits(e.clientX, e.clientY)) {
-    atmosphere.retreat(performance.now());
-    return;
-  }
   if (revealStart === null) { pull(); return; }
   if (hitsNoah(e.clientX, e.clientY)) { headDrop.play(performance.now()); return; }
   if (hitsLamp(e.clientX, e.clientY)) {
@@ -592,7 +600,6 @@ function tapScene(e) {
   if (hitsSign(e.clientX, e.clientY)) {
     const now = performance.now();
     atmosphere?.emit(now);
-    atmosphere?.startSpider(now, true);
     if (neonOn) glitch = { groups: ["heading", "title", "prefix"], keys: STUTTER, start: now };
     return;
   }
@@ -727,6 +734,21 @@ function placeChain(viewProj) {
   });
   chain.style.height = `${Math.hypot(b[0] - a[0], b[1] - a[1])}px`;
   chain.style.transform = `translate(${a[0]}px, ${a[1]}px) rotate(${Math.atan2(a[0] - b[0], b[1] - a[1])}rad)`;
+}
+
+function drawHalo(bx, by, level) {
+  const r = canvas.height * 0.3;
+  gl.useProgram(haloPass.p);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.enable(gl.SCISSOR_TEST);
+  gl.scissor(Math.floor(bx - r), Math.floor(by - r), Math.ceil(2 * r), Math.ceil(2 * r));
+  gl.uniform2f(haloPass.u.uCenter, bx, by);
+  gl.uniform1f(haloPass.u.uSize, canvas.height);
+  gl.uniform1f(haloPass.u.uCore, lampMesh ? 0.26 : 0.55);
+  gl.uniform3fv(haloPass.u.uColor, BULB_COLOR.map(c => c * level));
+  gl.bindVertexArray(haloVao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.disable(gl.SCISSOR_TEST);
 }
 
 function frame(now) {
@@ -864,18 +886,7 @@ function frame(now) {
     // The glow is invisible beyond ~0.3 screen heights, so only shade that square.
     const bx = bulbScreen[0] * canvas.width / innerWidth;
     const by = (innerHeight - bulbScreen[1]) * canvas.height / innerHeight;
-    const r = canvas.height * 0.3;
-    gl.useProgram(haloPass.p);
-    gl.blendFunc(gl.ONE, gl.ONE);
-    gl.enable(gl.SCISSOR_TEST);
-    gl.scissor(Math.floor(bx - r), Math.floor(by - r), Math.ceil(2 * r), Math.ceil(2 * r));
-    gl.uniform2f(haloPass.u.uCenter, bx, by);
-    gl.uniform1f(haloPass.u.uSize, canvas.height);
-    gl.uniform1f(haloPass.u.uCore, lampMesh ? 0.26 : 0.55);
-    gl.uniform3fv(haloPass.u.uColor, BULB_COLOR.map(c => c * power * bulb * bulbLevel));
-    gl.bindVertexArray(haloVao);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.disable(gl.SCISSOR_TEST);
+    drawHalo(bx, by, power * bulb * bulbLevel);
   }
   if (scene.m.chain) placeChain(viewProj);
   if (atmosphere) {
@@ -903,64 +914,115 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+async function loadHeadAssets(signal) {
+  const response = await fetch("assets/head-drop-physics.json", { signal });
+  if (!response.ok) throw new Error("Head reaction unavailable");
+  const data = await response.json();
+  if (![data.pivot, data.hit, data.bodyHit, data.axis, data.floor?.point, data.floor?.normal].every(p => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite)) ||
+      ![data.axis,data.floor.normal].every(p => Math.abs(Math.hypot(...p)-1) < 0.001) ||
+      !(data.radius > 0 && data.bodyRadius > 0)) throw new Error("Invalid head reaction controls");
+  const metadataResponse = await fetch("assets/head-mesh-packed.json", { signal });
+  if (!metadataResponse.ok) throw new Error("Head geometry unavailable");
+  const metadata = await metadataResponse.json();
+  const [mask, image, albedo, meshResponse] = await Promise.all([
+    loadImage("assets/" + data.mask, signal), loadImage("assets/head-light.webp", signal), loadImage("assets/" + metadata.texture.file, signal),
+    fetch("assets/" + metadata.binary, { signal }),
+  ]);
+  if (!meshResponse.ok) throw new Error("Head geometry unavailable");
+  const binary = metadata.compression === "gzip"
+    ? await new Response(meshResponse.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
+    : await meshResponse.arrayBuffer();
+  if (!metadata.pivot.every((v,i) => Math.abs(v-data.pivot[i]) < 0.00001)) throw new Error("Head geometry pivot mismatch");
+  return { data, metadata, mask, image, albedo, binary };
+}
+
+async function waitForGpu() {
+  const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  gl.flush();
+  try {
+    while (true) {
+      const status = gl.clientWaitSync(fence, 0, 0);
+      if (status === gl.WAIT_FAILED) throw new Error("Scene preparation failed");
+      if (status !== gl.TIMEOUT_EXPIRED) return;
+      await new Promise(requestAnimationFrame);
+    }
+  } finally {
+    gl.deleteSync(fence);
+  }
+}
+
+function prepareMeshes() {
+  const eye = [0,0,0];
+  const viewProj = mul(proj, lookAt(eye, [0,0,-scene.m.focus]));
+  const sw = scene.m.swing;
+  const angle = swing.angle;
+  const bulb = rotateAround(sw.bulb, sw.pivot, sw.axis, angle);
+  lampMesh?.draw({ viewProj, cover, lift, angle, pull: 0, eye, bulb, bulbLevel: 1, neonLevel: 1 });
+  if (headMesh) {
+    // Exercise the lit mesh and floor shadow before either can appear on screen.
+    const reaction = new HeadDrop(headDrop.data);
+    reaction.play(0);
+    reaction.update(1400);
+    headMesh.draw({ viewProj, cover, lift, eye, bulb, bulbLevel: 1, reaction,
+      source: scene.layers.find(layer => layer.name === "chars"), manifest: scene.m,
+      lighting: swing.tex, lightBlend: Motion.blend(scene.m.motion.lighting.angles, angle),
+      levels: { heading: 1, title: 1, prefix: 1, floor: 1 }, power: 1, backPower: 1 });
+  }
+  const [bx, by] = toCanvas(viewProj, bulb);
+  drawHalo(bx, by, 1);
+  gl.useProgram(scenePass.p);
+}
+
 async function main() {
+  canvas.style.visibility = "hidden";
+  // Download together, but keep mesh construction and first-use uploads under the loader.
+  const lampAssets = optionalAssets(async signal => {
+    const response = await fetch("assets/lamp-mesh.json", { signal });
+    if (!response.ok) throw new Error("Lamp mesh unavailable");
+    return response.json();
+  }, "Using rendered lamp fallback");
+  const headAssets = optionalAssets(loadHeadAssets, "The head reaction could not load; the invitation is still ready.");
   scene = await loadScene();
   proj = perspective(scene.m.tanX, scene.m.tanY, 0.1, 50);
   swing = await setupSwing(scene.m.motion.lighting);
   gl.activeTexture(gl.TEXTURE7);
   gl.bindTexture(gl.TEXTURE_2D, scene.black);
-  fetch("assets/lamp-mesh.json")
-    .then(response => {
-      if (!response.ok) throw new Error("Lamp mesh unavailable");
-      return response.json();
-    })
-    .then(data => { lampMesh = new LampMesh(gl, data, program); })
-    .catch(err => console.warn("Using rendered lamp fallback", err));
-  rsvp.href = PARTIFUL_URL;
-  rsvp.hidden = false;
-  setupAtmosphere();
-  fetch("assets/head-drop-physics.json")
-    .then(response => {
-      if (!response.ok) throw new Error("Head reaction unavailable");
-      return response.json();
-    })
-    .then(async data => {
-      if (![data.pivot, data.hit, data.bodyHit, data.axis, data.floor?.point, data.floor?.normal].every(p => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite)) ||
-          ![data.axis,data.floor.normal].every(p => Math.abs(Math.hypot(...p)-1) < 0.001) ||
-          !(data.radius > 0 && data.bodyRadius > 0)) throw new Error("Invalid head reaction controls");
+  const [lampData, headData] = await Promise.all([lampAssets, headAssets]);
+  if (lampData) {
+    try { lampMesh = new LampMesh(gl, lampData, program); }
+    catch (err) { console.warn("Using rendered lamp fallback", err); }
+  }
+  if (headData) {
+    try {
+      const { data, metadata, mask, image, albedo, binary } = headData;
       const reaction = new HeadDrop(data, reducedMotion.matches);
       if (!reaction.valid) throw new Error("Invalid head reaction animation");
-      const metadataResponse = await fetch("assets/head-mesh-packed.json");
-      if (!metadataResponse.ok) throw new Error("Head geometry unavailable");
-      const metadata = await metadataResponse.json();
-      const [mask, image, albedo, meshResponse] = await Promise.all([
-        loadImage("assets/" + data.mask), loadImage("assets/head-light.webp"), loadImage("assets/" + metadata.texture.file),
-        fetch("assets/" + metadata.binary),
-      ]);
-      if (!meshResponse.ok) throw new Error("Head geometry unavailable");
-      const binary = metadata.compression === "gzip"
-        ? await new Response(meshResponse.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
-        : await meshResponse.arrayBuffer();
-      if (!metadata.pivot.every((v,i) => Math.abs(v-data.pivot[i]) < 0.00001)) throw new Error("Head geometry pivot mismatch");
       const mesh = new HeadMesh(gl, metadata, binary, image, albedo, program);
       gl.activeTexture(gl.TEXTURE7);
       const maskTexture = texture(mask, { nearest: true });
       headMesh = mesh;
       headMask = maskTexture;
       headDrop = reaction;
-    })
-    .catch(err => console.warn("The head reaction could not load; the invitation is still ready.", err));
+    } catch (err) { console.warn("The head reaction could not load; the invitation is still ready.", err); }
+  }
+  rsvp.href = PARTIFUL_URL;
+  rsvp.hidden = false;
+  setupAtmosphere();
 
   resize();
   addEventListener("resize", resize);
-  requestAnimationFrame(frame);
+  prepareMeshes();
+  await waitForGpu();
+  frame(performance.now());
+  await waitForGpu();
+  canvas.style.visibility = "";
   loadingEl.remove();
   chain.hidden = !scene.m.chain;
   chain.addEventListener("click", () => pull());
   canvas.addEventListener("click", tapScene);
   chain.addEventListener("pointerdown", e => beginGesture(e, "chain"));
   canvas.addEventListener("pointerdown", e => beginGesture(e,
-    atmosphere?.hits(e.clientX, e.clientY) ? "spider" : revealStart !== null && hitsNoah(e.clientX, e.clientY) ? "noah" : hitsLamp(e.clientX, e.clientY) ? "lamp" : "scene"));
+    revealStart !== null && hitsNoah(e.clientX, e.clientY) ? "noah" : hitsLamp(e.clientX, e.clientY) ? "lamp" : "scene"));
   for (const element of [canvas, chain]) {
     element.addEventListener("pointermove", moveGesture);
     element.addEventListener("pointerup", e => finishGesture(e));
