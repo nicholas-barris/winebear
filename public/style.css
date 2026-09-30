@@ -11,12 +11,16 @@ html, body {
   font-family: ui-rounded, "SF Pro Rounded", "Nunito", system-ui, sans-serif;
 }
 
-#scene {
+#scene, #atmosphere {
   position: fixed;
   inset: 0;
   width: 100%;
   height: 100%;
   display: block;
+}
+
+#atmosphere {
+  pointer-events: none;
 }
 
 .neon-yellow {

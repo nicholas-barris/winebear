@@ -5,3 +5,7 @@ renders/
 blender/*.blend
 blender/*.blend1
 blender/*.log
+
+# Intermediate full precision head mesh; the packed mesh is shipped instead.
+public/assets/head-mesh.json
+public/assets/head-mesh.bin
