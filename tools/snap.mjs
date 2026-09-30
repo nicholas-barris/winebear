@@ -157,7 +157,7 @@ if (openingCheck) await S("Page.addScriptToEvaluateOnNewDocument", {source:`
 const [VW, VH] = (process.env.VIEWPORT || "393x852").split("x").map(Number);
 await S("Emulation.setDeviceMetricsOverride", { width: VW, height: VH, deviceScaleFactor: 2, mobile: true });
 await S("Emulation.setTouchEmulationEnabled", { enabled: true });
-await S("Page.navigate", { url: ORIGIN + "/" });
+await S("Page.navigate", { url: ORIGIN + (process.env.PHYSICS_CHECK ? "/physics.html" : "/") });
 
 async function snap(name) {
   const { data } = await S("Page.captureScreenshot", { format: "png" });
@@ -222,6 +222,48 @@ try {
   await (async () => {
   for (let i = 0; i < 120 && (await evalJs("!!document.getElementById('loading')")); i++) await sleep(250);
   check("scene loaded", await evalJs("!!scene && !document.getElementById('loading')"));
+  if (process.env.RENDER_COMPARE) {
+    await pullChain();
+    await evalJs("window.requestAnimationFrame=()=>0");await sleep(200);
+    await evalJs("Object.assign(tilt,{x:0,y:0,tx:0,ty:0,lastInput:10000});revealStart=0;bulbChange.start=0;neonOn=true;bulbOn=true;nextGlitchAt=Infinity;glitch=null;Motion.step=()=>0.15;atmosphere=null;atmosphereCanvas.getContext('2d').clearRect(0,0,atmosphereCanvas.width,atmosphereCanvas.height);lastFrame=10000;lampPull=0;dprCap=2;resize();frame(10000);gl.finish()");
+    await snap("comparison");return;
+  }
+  if (process.env.PHYSICS_CHECK) {
+    check("Three renderer and Rapier collision hull ready", await evalJs("stage.renderer.isWebGLRenderer && !!headDrop?.body && !!headDrop?.collider && !!lampMesh"));
+    await pullChain();
+    await evalJs("revealStart=performance.now()-7000; bulbChange.start=performance.now()-7000; nextGlitchAt=Infinity");
+    await sleep(300); await neutral(); await snap("physics-00-rest");
+    check("heading and date fit above RSVP",await evalJs("(() => {const [top,bottom]=scene.m.keep,k=cover[1]*innerHeight/scene.m.height;const y=row=>innerHeight/2+(row-scene.m.height/2)*k-lift*innerHeight/2;return y(top)>=-1 && y(bottom)<rsvp.getBoundingClientRect().top})()"));
+    const hit=await evalJs("otherHeadScreen");
+    await tap(hit[0],hit[1]); await sleep(300);
+    check("tap starts live fall",await waitFor("headDrop.active && headDrop.translation[1]<-.05",5000));
+    await snap("physics-01-fall");
+    await sleep(1300);
+    check("head stays above floor after collision",await evalJs("(() => {const p=headDrop.body.translation(),f=headDrop.data.floor;return [p.x,p.y,p.z].reduce((s,v,i)=>s+(v-f.point[i])*f.normal[i],0)>.2})()"));
+    await snap("physics-02-floor");
+    const fallen=await evalJs("otherHeadScreen");
+    const before=await evalJs("headDrop.body.translation().y");
+    await drag(fallen[0],fallen[1],-55,-90,async()=>{
+      await sleep(400);
+      check("drag grabs physical head",await evalJs("headDrop.grabbed && gesture.kind==='head'"));
+      check("spring lifts head",await evalJs(`headDrop.body.translation().y > ${before}+.15`));
+      await snap("physics-03-grab");
+    });
+    check("release resumes simulation",await evalJs("!headDrop.grabbed && headDrop.active"));
+    const bulbBefore=await evalJs("bulbOn"); const lp=await lampPoint();await tap(...lp);await sleep(400);
+    check("lamp works during physics",await evalJs(`bulbOn!==${bulbBefore} && headDrop.active`));
+    await snap("physics-04-bulb-off");
+    await tap(...lp);await sleep(400);
+    await evalJs("headDrop.lastInteraction=performance.now()-9000");await sleep(100);
+    check("head returns cleanly",await waitFor(HEAD_REST,5000));
+    await snap("physics-05-return");
+    await S("Emulation.setEmulatedMedia",{features:[{name:"prefers-reduced-motion",value:"reduce"}]});await sleep(100);
+    const again=await evalJs("otherHeadScreen");await tap(again[0],again[1]);await sleep(100);
+    check("reduced motion remains attached",await evalJs("headDrop.reduced && headDrop.translation.every(v=>v===0) && !headDrop.body.isEnabled()"));
+    check("renderer reports no GL errors",await evalJs("gl.getError()===gl.NO_ERROR"));
+    check("RSVP remains usable",await evalJs("rsvp.classList.contains('on') && rsvp.href.includes('partiful.com')"));
+    return;
+  }
   if (openingCheck) {
     check("opening mesh and lifecycle instrumentation installed",["LampMesh","HeadMesh","loading","reveal"].every(name=>openingInstrumentation.has(name)));
     await pullChain();
