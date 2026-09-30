@@ -97,6 +97,19 @@ async function tap(x, y) {
   await S("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
   await S("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
+async function drag(x, y, dx, dy, held, cancel = false) {
+  await S("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  for (let i = 1; i <= 5; i++) {
+    await S("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x + dx * i / 5, y: y + dy * i / 5 }] });
+  }
+  await sleep(100);
+  if (held) await held();
+  await S("Input.dispatchTouchEvent", { type: cancel ? "touchCancel" : "touchEnd", touchPoints: [] });
+  await sleep(400);
+}
+async function lampPoint() {
+  return evalJs("[bulbScreen[0], Math.max(signScreen[3] + 8, bulbScreen[1] - 18)]");
+}
 async function pullChain() {
   const [x, y] = await evalJs("(() => { const r = chain.querySelector('.bead').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()");
   await tap(x, y);
@@ -153,6 +166,54 @@ try {
   await pullChain();
   await sleep(400);
   check("third pull turns neon on", await evalJs("neonOn && Object.values(levels).every(v => v === 1)"));
+  await neutral();
+  const tiltBeforePull = await evalJs("[tilt.tx, tilt.ty]");
+  await drag(...await lampPoint(), 0, 55, async () => {
+    check("lamp cord is captured during pull", await evalJs("gesture?.kind === 'lamp'"));
+    check("lamp follows downward pull", await evalJs("lampPull > 12"));
+    check("bulb waits for release", await evalJs("bulbOn"));
+    check("pull leaves camera still", JSON.stringify(tiltBeforePull) === JSON.stringify(await evalJs("[tilt.tx, tilt.ty]")));
+    await snap("9-lamp-pull-held");
+  });
+  check("cord pull toggles bulb exactly once", await evalJs("!bulbOn && neonOn && !gesture"));
+  check("pull suppression does not block RSVP", await evalJs(`(() => {
+    let reached = false;
+    rsvp.addEventListener('click', e => { reached = true; e.preventDefault(); }, {once: true});
+    suppressClickUntil = performance.now() + 500;
+    rsvp.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}));
+    return reached;
+  })()`));
+  check("lamp returns after release", await evalJs("lampPull < 0.5"));
+  await drag(...await lampPoint(), 65, 4);
+  check("sideways lamp drag does not toggle", await evalJs("!bulbOn"));
+  await drag(...await lampPoint(), 0, 16);
+  check("short lamp pull does not toggle", await evalJs("!bulbOn"));
+  await drag(...await lampPoint(), 0, 55, null, true);
+  check("cancelled lamp pull does not toggle", await evalJs("!bulbOn && !gesture && lampPull < 0.5"));
+  await drag(...await lampPoint(), 0, 55, async () => {
+    await evalJs("dispatchEvent(new Event('blur'))");
+    check("interrupted pull cancels without toggling", await evalJs("!gesture && !bulbOn"));
+  }, true);
+  await drag(...await lampPoint(), 0, 55);
+  check("second lamp pull turns bulb on", await evalJs("bulbOn"));
+  const chainPoint = await evalJs("(() => { const r = chain.querySelector('.bead').getBoundingClientRect(); return [r.x+r.width/2,r.y+r.height/2]; })()");
+  await drag(...chainPoint, 0, 55, async () => {
+    check("chain follows downward pull", await evalJs("gesture?.kind === 'chain' && chain.querySelector('.pull').style.transform === 'translateY(24px)'"));
+    await snap("10-chain-pull-held");
+  });
+  check("chain drag toggles neon exactly once", await evalJs("!neonOn && bulbOn"));
+  await pullChain();
+  await sleep(400);
+  check("chain tap still works after drag", await evalJs("neonOn"));
+  const mouseLamp = await lampPoint();
+  await S("Input.dispatchMouseEvent", { type: "mousePressed", x: mouseLamp[0], y: mouseLamp[1], button: "left", buttons: 1, clickCount: 1 });
+  await S("Input.dispatchMouseEvent", { type: "mouseMoved", x: mouseLamp[0], y: mouseLamp[1] + 55, button: "left", buttons: 1 });
+  await S("Input.dispatchMouseEvent", { type: "mouseReleased", x: mouseLamp[0], y: mouseLamp[1] + 55, button: "left", buttons: 0, clickCount: 1 });
+  await sleep(400);
+  check("mouse cord drag toggles once", await evalJs("!bulbOn"));
+  await tap(...await evalJs("bulbScreen"));
+  await sleep(400);
+  check("bulb tap still works after drag", await evalJs("bulbOn"));
   for (const name of ["sign", "floor"]) {
     await neutral();
     const [x, y] = await evalJs(`(() => {
@@ -218,6 +279,14 @@ try {
   }
   await tap(VW * 0.2, VH * 0.7);
   check("first tap anywhere starts reveal", await evalJs("revealStart !== null && neonOn"));
+  await S("Page.reload");
+  for (let i = 0; i < 120; i++) {
+    await sleep(250);
+    if (await evalJs("typeof scene !== 'undefined' && !!scene && !document.getElementById('loading')")) break;
+  }
+  await sleep(100);
+  await drag(...await lampPoint(), 0, 55);
+  check("first cord drag starts reveal", await evalJs("revealStart !== null && neonOn && bulbOn"));
 } catch (err) {
   failures.push(err.stack);
 } finally {

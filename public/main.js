@@ -42,6 +42,7 @@ uniform float uLift;
 uniform vec3 uPivot;      // lamp hinge, camera space
 uniform vec3 uAxis;
 uniform float uAngle;
+uniform float uPull, uLampLength;
 uniform float uNod;
 uniform vec3 uHeadPivot, uHeadAxis, uHeadUp;
 uniform vec2 uNeck;
@@ -65,7 +66,7 @@ void main() {
   p = uPivot + rotate(p - uPivot, uAxis, uAngle);
   gl_Position = uViewProj * vec4(p, 1.0);
   gl_Position.xy *= uCover;
-  gl_Position.y += uLift * gl_Position.w;
+  gl_Position.y += (uLift - uPull * clamp(length(p - uPivot) / uLampLength, 0.0, 1.0)) * gl_Position.w;
 }`;
 
 const FRAG = `#version 300 es
@@ -164,7 +165,7 @@ function program(vert, frag, uniforms) {
 
 const scenePass = program(VERT, FRAG, [
   "uDepth", "uRect", "uImage", "uStep", "uCam", "uViewProj", "uCover", "uLift", "uPivot", "uAxis",
-  "uAngle", "uBase", "uGlow0", "uGlow1", "uGlow2", "uGlow3", "uLight", "uGlowRect", "uLightRect",
+  "uAngle", "uPull", "uLampLength", "uBase", "uGlow0", "uGlow1", "uGlow2", "uGlow3", "uLight", "uGlowRect", "uLightRect",
   "uNod", "uHeadPivot", "uHeadAxis", "uHeadUp", "uNeck", "uLightBlend", "uLightReference",
   "uUseLight", "uLevels", "uPower", "uGrain", "uTime", "uResolution",
 ]);
@@ -284,6 +285,7 @@ async function loadScene() {
   if (m.swing) {
     gl.uniform3fv(u.uPivot, m.swing.pivot);
     gl.uniform3fv(u.uAxis, m.swing.axis);
+    gl.uniform1f(u.uLampLength, Math.hypot(...m.swing.bulb.map((v, i) => v - m.swing.pivot[i])));
   }
   const c = motion.character;
   gl.uniform3fv(u.uHeadPivot, c.pivot);
@@ -378,6 +380,7 @@ const tilt = { x: 0, y: 0, tx: 0, ty: 0, lastInput: -1e9 };
 let baseline = null;
 
 function onOrientation(e) {
+  if (gesture && gesture.kind !== "scene") return;
   if (e.gamma == null || e.beta == null) return;
   if (!baseline) baseline = { g: e.gamma, b: e.beta };
   // Slowly re-centre on however they're holding the phone.
@@ -390,6 +393,7 @@ function onOrientation(e) {
 }
 
 function onPointer(e) {
+  if (e.isPrimary === false || (gesture && gesture.kind !== "scene")) return;
   if (e.pointerType === "touch" && e.buttons === 0) return;
   tilt.tx = clamp((e.clientX / innerWidth) * 2 - 1, -1, 1);
   tilt.ty = clamp((e.clientY / innerHeight) * 2 - 1, -1, 1);
@@ -425,11 +429,11 @@ function toggleBulb() {
   bulbChange = { start: now, before, keys: bulbOn ? BULB_ON : FLICK_OFF };
 }
 
-function pull() {
+function pull(tugFrom = 0) {
   const now = performance.now();
   tugAnimation?.cancel();
   tugAnimation = chain.querySelector(".pull").animate([
-    { transform: "translateY(0)" }, { transform: "translateY(14px)", offset: 0.3 },
+    { transform: `translateY(${tugFrom}px)` }, { transform: "translateY(14px)", offset: 0.3 },
     { transform: "translateY(-3px)", offset: 0.65 }, { transform: "translateY(0)" },
   ], { duration: 450, easing: "ease-out" });
   if (revealStart === null) {
@@ -451,9 +455,72 @@ function pull() {
   chain.setAttribute("aria-pressed", String(neonOn));
 }
 
+let gesture = null;
+let suppressClickUntil = 0;
+let cordScreen = null;
+let signScreen = null;
+let lampPull = 0;
+let lampPullTarget = 0;
+const PULL_DISTANCE = 26;
+
+function hitsLamp(x, y) {
+  if (!bulbScreen || !cordScreen) return false;
+  if (signScreen && x >= signScreen[0] && x <= signScreen[2] && y >= signScreen[1] && y <= signScreen[3]) return false;
+  if (Math.hypot(x - bulbScreen[0], y - bulbScreen[1]) <= 60) return true;
+  const [a, b] = cordScreen;
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const t = clamp(((x - a[0]) * dx + (y - a[1]) * dy) / Math.max(1, dx * dx + dy * dy), 0, 1);
+  return Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy) <= 22;
+}
+
+function beginGesture(e, kind) {
+  if (!e.isPrimary || e.button !== 0 || gesture) return;
+  suppressClickUntil = 0;
+  gesture = { id: e.pointerId, kind, element: e.currentTarget, x: e.clientX, y: e.clientY, dx: 0, dy: 0, moved: false };
+  e.currentTarget.setPointerCapture(e.pointerId);
+  if (kind !== "scene") {
+    tilt.tx = tilt.x; tilt.ty = tilt.y;
+    if (kind === "lamp") { swing.velocity = 0; canvas.style.cursor = "grabbing"; }
+    else tugAnimation?.cancel();
+  }
+}
+
+function moveGesture(e) {
+  if (!gesture || e.pointerId !== gesture.id) return;
+  gesture.dx = e.clientX - gesture.x;
+  gesture.dy = e.clientY - gesture.y;
+  gesture.moved ||= Math.hypot(gesture.dx, gesture.dy) > 10;
+  const amount = Math.min(24, Math.max(0, gesture.dy) * 0.45);
+  if (gesture.kind === "lamp") lampPullTarget = amount;
+  if (gesture.kind === "chain") chain.querySelector(".pull").style.transform = `translateY(${amount}px)`;
+}
+
+function finishGesture(e, cancelled = false) {
+  if (!gesture || e.pointerId !== gesture.id) return;
+  const g = gesture;
+  gesture = null;
+  lampPullTarget = 0;
+  canvas.style.cursor = "";
+  const amount = Math.min(24, Math.max(0, g.dy) * 0.45);
+  const pulled = !cancelled && g.dy >= PULL_DISTANCE && g.dy > Math.abs(g.dx);
+  if (cancelled || g.moved) suppressClickUntil = performance.now() + 500;
+  if (g.kind === "chain") {
+    chain.querySelector(".pull").style.transform = "";
+    if (pulled) pull(amount);
+    else if (g.moved || cancelled) {
+      tugAnimation = chain.querySelector(".pull").animate([
+        { transform: `translateY(${amount}px)` }, { transform: "translateY(0)" },
+      ], { duration: 180, easing: "ease-out" });
+    }
+  } else if (g.kind === "lamp" && pulled) {
+    if (revealStart === null) pull(); else toggleBulb();
+  }
+  if (g.element.hasPointerCapture(g.id)) g.element.releasePointerCapture(g.id);
+}
+
 function tapScene(e) {
   if (revealStart === null) { pull(); return; }
-  if (bulbScreen && Math.hypot(e.clientX - bulbScreen[0], e.clientY - bulbScreen[1]) <= 60) {
+  if (hitsLamp(e.clientX, e.clientY)) {
     toggleBulb();
     return;
   }
@@ -607,6 +674,8 @@ function frame(now) {
     resize();
   }
 
+  if (gesture && gesture.kind !== "scene") tilt.lastInput = now;
+  lampPull += (lampPullTarget - lampPull) * (1 - Math.exp(-dt / (gesture ? 0.035 : 0.075)));
   const idle = now - tilt.lastInput > 2500;
   if (idle) {
     tilt.tx = Math.sin(now / 2300) * 0.35;
@@ -618,7 +687,7 @@ function frame(now) {
   tilt.y += (tilt.ty - tilt.y) * follow;
 
   const sw = scene.m.swing;
-  const angle = Motion.step(swing, dt);
+  const angle = gesture?.kind === "lamp" ? swing.angle : Motion.step(swing, dt);
   const character = scene.m.motion.character;
   nodAngle = Motion.sample(character.nod, character.fps, (now - nodStart) / 1000);
   const lit = !!(swing && swing.ready);
@@ -636,7 +705,18 @@ function frame(now) {
   const bulbLevel = bulbLevelAt(now);
   if (sw) {
     const [bx, by] = toCanvas(viewProj, rotateAround(sw.bulb, sw.pivot, sw.axis, angle));
-    bulbScreen = [bx * innerWidth / canvas.width, innerHeight - by * innerHeight / canvas.height];
+    bulbScreen = [bx * innerWidth / canvas.width, innerHeight - by * innerHeight / canvas.height + lampPull];
+    const [px, py] = toCanvas(viewProj, sw.pivot);
+    cordScreen = [[px * innerWidth / canvas.width, innerHeight - py * innerHeight / canvas.height], bulbScreen];
+    const [x, y, w, h] = scene.m.hotspots.sign, z = -scene.m.chain.anchor[2];
+    const corners = [[x, y], [x + w, y], [x, y + h], [x + w, y + h]].map(([ix, iy]) => {
+      const p = [(ix / scene.m.width * 2 - 1) * scene.m.tanX * z,
+                 (1 - iy / scene.m.height * 2) * scene.m.tanY * z, -z];
+      const [sx, sy] = toCanvas(viewProj, p);
+      return [sx * innerWidth / canvas.width, innerHeight - sy * innerHeight / canvas.height];
+    });
+    signScreen = [Math.min(...corners.map(p => p[0])), Math.min(...corners.map(p => p[1])),
+                  Math.max(...corners.map(p => p[0])), Math.max(...corners.map(p => p[1]))];
   }
 
   gl.useProgram(scenePass.p);
@@ -660,6 +740,7 @@ function frame(now) {
     gl.uniform1f(u.uGrain, L.name === "room" ? 1 : 0);
     gl.uniform1f(u.uAngle, L.name === "lamp" ? angle : 0);
     gl.uniform1f(u.uNod, L.name === "chars" ? nodAngle : 0);
+    gl.uniform1f(u.uPull, L.name === "lamp" ? lampPull * 2 / innerHeight : 0);
     gl.uniform1f(u.uUseLight, lit && L.lightRect ? 1 : 0);
     if (L.lightRect) gl.uniform4fv(u.uLightRect, L.lightRect);
     gl.activeTexture(gl.TEXTURE0);
@@ -676,7 +757,8 @@ function frame(now) {
 
   if (sw && bulbLevel > 0) {
     // The glow is invisible beyond ~0.3 screen heights, so only shade that square.
-    const [bx, by] = toCanvas(viewProj, rotateAround(sw.bulb, sw.pivot, sw.axis, angle));
+    const bx = bulbScreen[0] * canvas.width / innerWidth;
+    const by = (innerHeight - bulbScreen[1]) * canvas.height / innerHeight;
     const r = canvas.height * 0.3;
     gl.useProgram(haloPass.p);
     gl.blendFunc(gl.ONE, gl.ONE);
@@ -705,21 +787,28 @@ async function main() {
   requestAnimationFrame(frame);
   loadingEl.remove();
   chain.hidden = !scene.m.chain;
-  chain.addEventListener("click", pull);
-  let pointerStart = null, dragged = false;
-  canvas.addEventListener("pointerdown", e => {
-    pointerStart = [e.clientX, e.clientY];
-    dragged = false;
+  chain.addEventListener("click", () => pull());
+  canvas.addEventListener("click", tapScene);
+  chain.addEventListener("pointerdown", e => beginGesture(e, "chain"));
+  canvas.addEventListener("pointerdown", e => beginGesture(e, hitsLamp(e.clientX, e.clientY) ? "lamp" : "scene"));
+  for (const element of [canvas, chain]) {
+    element.addEventListener("pointermove", moveGesture);
+    element.addEventListener("pointerup", e => finishGesture(e));
+    element.addEventListener("pointercancel", e => finishGesture(e, true));
+    element.addEventListener("lostpointercapture", e => finishGesture(e, true));
+  }
+  addEventListener("click", e => {
+    if (e.detail > 0 && (e.target === canvas || chain.contains(e.target)) && performance.now() < suppressClickUntil) {
+      e.preventDefault(); e.stopImmediatePropagation();
+    }
+  }, true);
+  const cancelGesture = () => { if (gesture) finishGesture({ pointerId: gesture.id }, true); };
+  addEventListener("blur", cancelGesture);
+  addEventListener("visibilitychange", () => {
+    if (document.hidden) cancelGesture();
+    lastFrame = 0;
+    if (swing) swing.input = null;
   });
-  canvas.addEventListener("pointermove", e => {
-    if (pointerStart && Math.hypot(e.clientX - pointerStart[0], e.clientY - pointerStart[1]) > 10) dragged = true;
-  });
-  canvas.addEventListener("pointercancel", () => { pointerStart = null; dragged = true; });
-  canvas.addEventListener("click", e => {
-    if (!dragged) tapScene(e);
-    pointerStart = null;
-  });
-  addEventListener("visibilitychange", () => { lastFrame = 0; if (swing) swing.input = null; });
   setupMotion(false);
 }
 
