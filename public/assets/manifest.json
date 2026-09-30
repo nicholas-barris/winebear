@@ -3,7 +3,6 @@
  "zNear": 0.1,
  "zFar": 20.0,
  "focus": 5.145,
- "step": 4,
  "layers": {
   "room": {
    "rect": [
@@ -15,9 +14,10 @@
    "base": "room_base.jpg",
    "depth": "room_depth.png",
    "grid": [
-    298,
-    645
+    150,
+    323
    ],
+   "step": 8,
    "glows": {
     "heading": {
      "file": "room_glow_heading.jpg",
@@ -70,6 +70,7 @@
     212,
     194
    ],
+   "step": 4,
    "glows": {
     "heading": {
      "file": "chars_glow_heading.jpg",
@@ -122,6 +123,7 @@
     236,
     107
    ],
+   "step": 4,
    "glows": {
     "heading": {
      "file": "sign_glow_heading.jpg",
@@ -174,6 +176,7 @@
     24,
     255
    ],
+   "step": 4,
    "glows": {}
   }
  },
@@ -184,6 +187,20 @@
   459,
   2170
  ],
+ "hotspots": {
+  "sign": [
+   135,
+   429,
+   918,
+   404
+  ],
+  "floor": [
+   209,
+   1907,
+   758,
+   264
+  ]
+ },
  "swing": {
   "pivot": [
    0.0,
@@ -272,5 +289,18 @@
     770
    ]
   }
+ },
+ "chain": {
+  "anchor": [
+   0.7555813483830657,
+   0.8727108585517239,
+   -3.8528664072632943
+  ],
+  "down": [
+   0.0,
+   -0.9841159685265801,
+   -0.17752678809405426
+  ],
+  "length": 0.36
  }
 }

@@ -11,10 +11,12 @@ const DATE_GAP = 10;               // CSS px kept clear between the date and the
 const LAYERS = ["room", "chars", "lamp", "sign"];   // back to front
 const GROUPS = ["heading", "title", "prefix", "floor"];
 const BULB_COLOR = [1.0, 0.75, 0.35];
-const DARK = 0.1;                  // room brightness before the chain is pulled
+const DARK = 0.1;                  // ambient brightness while the bulb is off
 const BULB_ON = [[0, 0.6], [0.05, 0.1], [0.13, 0.9], [0.2, 0.3], [0.3, 1]];   // sputter after the pull
-const NEON_DELAY = 600;            // ms from the pull to the start of the neon reveal
-const CHAIN = { side: 0.045, rise: 0.05, length: 0.36 };                       // metres, from the bulb
+const BULB_DELAY = 2000;
+const FLICK_ON = [[0, 0.4], [0.05, 0], [0.12, 0.8], [0.18, 0.2], [0.27, 1]];
+const FLICK_OFF = [[0, 0.2], [0.04, 0.8], [0.1, 0], [0.16, 0.3], [0.22, 0]];
+const STUTTER = [[0, 0.25], [0.04, 1], [0.1, 0], [0.14, 0.8], [0.2, 1]];
 
 // Stepped [seconds, level] keys after the tap, echoing the Blender flicker timing.
 const REVEAL = {
@@ -39,7 +41,10 @@ uniform vec2 uCover;
 uniform float uLift;
 uniform vec3 uPivot;      // lamp hinge, camera space
 uniform vec3 uAxis;
-uniform float uAngle;     // lamp swing; 0 for every other layer
+uniform float uAngle;
+uniform float uNod;
+uniform vec3 uHeadPivot, uHeadAxis, uHeadUp;
+uniform vec2 uNeck;
 out vec2 vUv;
 
 vec3 rotate(vec3 v, vec3 k, float a) {
@@ -47,12 +52,16 @@ vec3 rotate(vec3 v, vec3 k, float a) {
 }
 
 void main() {
-  vec2 px = min(aCell * uStep, uRect.zw - 1.0);
+  vec2 cell = clamp(aCell, vec2(0.0), vec2(textureSize(uDepth, 0) - 1));
+  vec2 px = min(cell * uStep, uRect.zw - 1.0) + (aCell - cell) * uStep;
   vUv = (px + 0.5) / uRect.zw;
-  vec2 rg = floor(texelFetch(uDepth, ivec2(aCell), 0).rg * 255.0 + 0.5);
+  vec2 rg = floor(texelFetch(uDepth, ivec2(cell), 0).rg * 255.0 + 0.5);
   float z = uCam.z + (rg.r * 256.0 + rg.g) / 65535.0 * (uCam.w - uCam.z);
   vec2 img = (uRect.xy + px + 0.5) / uImage;
   vec3 p = vec3((img.x * 2.0 - 1.0) * uCam.x * z, (1.0 - img.y * 2.0) * uCam.y * z, -z);
+  float headWeight = smoothstep(uNeck.x, uNeck.y, dot(p - uHeadPivot, uHeadUp));
+  headWeight *= 1.0 - smoothstep(-0.05, 0.05, p.x);
+  p = uHeadPivot + rotate(p - uHeadPivot, uHeadAxis, uNod * headWeight);
   p = uPivot + rotate(p - uPivot, uAxis, uAngle);
   gl_Position = uViewProj * vec4(p, 1.0);
   gl_Position.xy *= uCover;
@@ -63,7 +72,10 @@ const FRAG = `#version 300 es
 precision highp float;
 in vec2 vUv;
 out vec4 outColor;
-uniform sampler2D uBase, uGlow0, uGlow1, uGlow2, uGlow3, uLight;
+uniform sampler2D uBase, uGlow0, uGlow1, uGlow2, uGlow3;
+uniform highp sampler2DArray uLight;
+uniform vec3 uLightBlend;
+uniform float uLightReference;
 uniform vec4 uGlowRect[4];   // each glow crop within the layer: uv offset, uv size
 uniform vec4 uLightRect;     // this layer's region of the swing lighting video
 uniform float uUseLight;
@@ -76,13 +88,22 @@ uniform vec2 uResolution;
 float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 
 vec3 glow(sampler2D t, vec4 r, float level) {
+  if (level <= 0.0) return vec3(0.0);
   vec2 g = (vUv - r.xy) / r.zw;
   return (texture(t, g).rgb + texture(t, g, 4.5).rgb * 0.6) * level;
 }
 
 void main() {
   vec4 base = texture(uBase, vUv);   // premultiplied
-  if (uUseLight > 0.5) base.rgb = texture(uLight, uLightRect.xy + vUv * uLightRect.zw).rgb * base.a;
+  if (uUseLight > 0.5) {
+    vec2 inset = 0.5 / vec2(textureSize(uLight, 0).xy);
+    vec2 uv = clamp(uLightRect.xy + vUv * uLightRect.zw,
+                    uLightRect.xy + inset, uLightRect.xy + uLightRect.zw - inset);
+    vec3 light = mix(texture(uLight, vec3(uv, uLightBlend.x)).rgb,
+                     texture(uLight, vec3(uv, uLightBlend.y)).rgb, uLightBlend.z);
+    vec3 reference = texture(uLight, vec3(uv, uLightReference)).rgb;
+    base.rgb = max(vec3(0.0), light * base.a + (base.rgb - reference * base.a) * 0.35);
+  }
   vec3 c = base.rgb * uPower
          + glow(uGlow0, uGlowRect[0], uLevels.x)
          + glow(uGlow1, uGlowRect[1], uLevels.y)
@@ -116,7 +137,8 @@ const loadingEl = document.getElementById("loading");
 const rsvp = document.getElementById("rsvp");
 const chain = document.getElementById("chain");
 
-const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
+// No MSAA: layer edges come from texture alpha, so it would only cost fill rate.
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
 if (!gl) {
   loadingEl.textContent = "open on a newer browser to see the show";
   throw new Error("WebGL2 unavailable");
@@ -143,6 +165,7 @@ function program(vert, frag, uniforms) {
 const scenePass = program(VERT, FRAG, [
   "uDepth", "uRect", "uImage", "uStep", "uCam", "uViewProj", "uCover", "uLift", "uPivot", "uAxis",
   "uAngle", "uBase", "uGlow0", "uGlow1", "uGlow2", "uGlow3", "uLight", "uGlowRect", "uLightRect",
+  "uNod", "uHeadPivot", "uHeadAxis", "uHeadUp", "uNeck", "uLightBlend", "uLightReference",
   "uUseLight", "uLevels", "uPower", "uGrain", "uTime", "uResolution",
 ]);
 const haloPass = program(HALO_VERT, HALO_FRAG, ["uCenter", "uSize", "uColor"]);
@@ -193,12 +216,14 @@ function texture(img, { mipmaps = false, premultiply = false, nearest = false } 
   return t;
 }
 
-function gridMesh(nx, ny) {
+function gridMesh(nx, ny, skirt = 0) {
+  nx += skirt * 2;
+  ny += skirt * 2;
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
   const cells = new Float32Array(nx * ny * 2);
   for (let y = 0, k = 0; y < ny; y++) {
-    for (let x = 0; x < nx; x++) { cells[k++] = x; cells[k++] = y; }
+    for (let x = 0; x < nx; x++) { cells[k++] = x - skirt; cells[k++] = y - skirt; }
   }
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
   gl.bufferData(gl.ARRAY_BUFFER, cells, gl.STATIC_DRAW);
@@ -220,7 +245,12 @@ function gridMesh(nx, ny) {
 }
 
 async function loadScene() {
-  const m = await (await fetch("assets/manifest.json")).json();
+  const [m, motion] = await Promise.all(["manifest.json", "motion.json"].map(async f => {
+    const response = await fetch("assets/" + f);
+    if (!response.ok) throw new Error("failed to load " + f);
+    return response.json();
+  }));
+  m.motion = motion;
   const black = texture(new ImageData(new Uint8ClampedArray([0, 0, 0, 255]), 1, 1));
   const layers = await Promise.all(LAYERS.map(async name => {
     const L = m.layers[name];
@@ -235,81 +265,65 @@ async function loadScene() {
       const r = L.glows[g] ? L.glows[g].rect : [0, 0, w, h];
       glowRects.set([r[0] / w, r[1] / h, r[2] / w, r[3] / h], i * 4);
     });
-    const lr = m.swing && m.swing.light && m.swing.light[name];
+    const lr = motion.lighting.light[name];
     return {
       name,
       rect: L.rect,
-      mesh: gridMesh(L.grid[0], L.grid[1]),
+      step: L.step,
+      mesh: gridMesh(L.grid[0], L.grid[1], name === "room" ? 32 : 0),
       base: texture(base, { premultiply: true }),
       depth: texture(depth, { nearest: true }),
       glows: glows.map(img => img ? texture(img, { mipmaps: true }) : black),
       glowRects,
-      lightRect: lr && [lr[0] / m.swing.atlas[0], lr[1] / m.swing.atlas[1],
-                        lr[2] / m.swing.atlas[0], lr[3] / m.swing.atlas[1]],
+      lightRect: lr && [lr[0] / motion.lighting.atlas[0], lr[1] / motion.lighting.atlas[1],
+                        lr[2] / motion.lighting.atlas[0], lr[3] / motion.lighting.atlas[1]],
     };
   }));
   gl.uniform2f(u.uImage, m.width, m.height);
-  gl.uniform1f(u.uStep, m.step);
   gl.uniform4f(u.uCam, m.tanX, m.tanY, m.zNear, m.zFar);
   if (m.swing) {
     gl.uniform3fv(u.uPivot, m.swing.pivot);
     gl.uniform3fv(u.uAxis, m.swing.axis);
   }
+  const c = motion.character;
+  gl.uniform3fv(u.uHeadPivot, c.pivot);
+  gl.uniform3fv(u.uHeadAxis, c.axis);
+  gl.uniform3fv(u.uHeadUp, c.up);
+  gl.uniform2fv(u.uNeck, c.neck);
   return { m, layers };
 }
 
 // ---- swinging lamp ----------------------------------------------------------
 
-// The lighting video holds one half-swing played forward then backward, so the lamp
-// angle is read from the same clock the frames come from.
-function setupSwing(sw) {
-  const video = document.createElement("video");
-  video.muted = true;
-  video.loop = true;
-  video.playsInline = true;
-  video.preload = "auto";
-  video.setAttribute("playsinline", "");
-  video.setAttribute("muted", "");
-  video.className = "offscreen";
-  video.src = "assets/" + sw.video;
-  document.body.appendChild(video);
-
-  const state = { video, tex: texture(null), ready: false, mediaTime: 0, at: 0 };
-  const upload = () => {
-    gl.activeTexture(gl.TEXTURE6);
-    gl.bindTexture(gl.TEXTURE_2D, state.tex);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-    state.ready = true;
-  };
-  if ("requestVideoFrameCallback" in video) {
-    const onFrame = (now, meta) => {
-      upload();
-      state.mediaTime = meta.mediaTime;
-      state.at = now;
-      video.requestVideoFrameCallback(onFrame);
-    };
-    video.requestVideoFrameCallback(onFrame);
-  } else {
-    state.pollUpload = () => { if (!video.paused && video.readyState >= 2) upload(); };
-  }
-  // Start at the end of the swing so the handoff from the still render doesn't jump.
-  video.addEventListener("loadedmetadata", () => { video.currentTime = (sw.angles.length - 1) / sw.fps; }, { once: true });
-  state.play = () => video.play().catch(() => {});
-  state.play();
-  return state;
+async function setupSwing(lighting) {
+  const images = await Promise.all(lighting.files.map(f => loadImage("assets/" + f)));
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE6);
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  const [w, h] = lighting.atlas;
+  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RGBA8, w, h, images.length);
+  images.forEach((img, i) => gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, w, h, 1, gl.RGBA, gl.UNSIGNED_BYTE, img));
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return { tex, ready: true, angle: 0.2, velocity: -0.12, input: null };
 }
 
-function swingAngle(sw, swing, now) {
-  if (!swing || !swing.ready) return sw ? sw.staticAngle : 0;
-  // Extrapolate a little past the last presented frame so the lamp moves at display rate.
-  const ahead = swing.video.paused ? 0 : Math.min((now - swing.at) / 1000, 1.5 / sw.fps);
-  const t = swing.at ? swing.mediaTime + ahead : swing.video.currentTime;
-  const n = sw.angles.length - 1;
-  const f = (t * sw.fps) % (2 * n);
-  const i = f <= n ? f : 2 * n - f;
-  const k = Math.min(Math.floor(i), n - 1);
-  return sw.angles[k] + (sw.angles[k + 1] - sw.angles[k]) * (i - k);
+function driveLamp(x) {
+  if (!swing) return;
+  if (swing.input !== null) Motion.nudge(swing, clamp((x - swing.input) * 0.55, -0.25, 0.25));
+  swing.input = x;
+}
+
+let nodStart = -Infinity;
+let characterScreen = null;
+let nodAngle = 0;
+
+function nod(now = performance.now()) {
+  if (now - nodStart < 1100) return;
+  nodStart = now;
 }
 
 function rotateAround(p, pivot, k, a) {
@@ -371,6 +385,7 @@ function onOrientation(e) {
   baseline.b += (e.beta - baseline.b) * 0.0015;
   tilt.tx = clamp(-(e.gamma - baseline.g) / MAX_TILT_DEG, -1, 1);
   tilt.ty = clamp((e.beta - baseline.b) / MAX_TILT_DEG, -1, 1);
+  driveLamp(tilt.tx);
   tilt.lastInput = performance.now();
 }
 
@@ -378,6 +393,7 @@ function onPointer(e) {
   if (e.pointerType === "touch" && e.buttons === 0) return;
   tilt.tx = clamp((e.clientX / innerWidth) * 2 - 1, -1, 1);
   tilt.ty = clamp((e.clientY / innerHeight) * 2 - 1, -1, 1);
+  driveLamp(tilt.tx);
   tilt.lastInput = performance.now();
 }
 
@@ -393,25 +409,86 @@ function setupMotion(fromTap) {
     .catch(() => {});
 }
 
-let lightsOnAt = null;
+let bulbOn = false;
+let bulbChange = null;
+let bulbScreen = null;
+let tugAnimation = null;
+
+function bulbLevelAt(now) {
+  return bulbChange ? stepped(bulbChange.keys, (now - bulbChange.start) / 1000, bulbChange.before) : 0;
+}
+
+function toggleBulb() {
+  const now = performance.now(), before = bulbLevelAt(now);
+  bulbOn = !bulbOn;
+  if (swing) Motion.nudge(swing, swing.angle > 0 ? -0.5 : 0.5);
+  bulbChange = { start: now, before, keys: bulbOn ? BULB_ON : FLICK_OFF };
+}
 
 function pull() {
-  if (lightsOnAt !== null) return;
-  lightsOnAt = performance.now();
-  revealStart = lightsOnAt + NEON_DELAY;
-  chain.classList.add("pulled");
-  if (swing) swing.play();
-  setupMotion(true);
+  const now = performance.now();
+  tugAnimation?.cancel();
+  tugAnimation = chain.querySelector(".pull").animate([
+    { transform: "translateY(0)" }, { transform: "translateY(14px)", offset: 0.3 },
+    { transform: "translateY(-3px)", offset: 0.65 }, { transform: "translateY(0)" },
+  ], { duration: 450, easing: "ease-out" });
+  if (revealStart === null) {
+    revealStart = now;
+    neonOn = true;
+    bulbOn = true;
+    bulbChange = { start: now + BULB_DELAY, keys: BULB_ON, before: 0 };
+    chain.classList.add("pulled");
+    if (swing) Motion.nudge(swing, 0.35);
+    setupMotion(true);
+  } else {
+    const before = neonLevelAt(now);
+    neonOn = !neonOn;
+    neonChange = { start: now, before, keys: neonOn ? FLICK_ON : FLICK_OFF };
+    glitch = null;
+    nextGlitchAt = Infinity;
+  }
+  chain.setAttribute("aria-label", neonOn ? "Pull the chain to turn off the neon" : "Pull the chain to turn on the neon");
+  chain.setAttribute("aria-pressed", String(neonOn));
+}
+
+function tapScene(e) {
+  if (revealStart === null) { pull(); return; }
+  if (bulbScreen && Math.hypot(e.clientX - bulbScreen[0], e.clientY - bulbScreen[1]) <= 60) {
+    toggleBulb();
+    return;
+  }
+  if (characterScreen && Math.hypot(e.clientX - characterScreen[0], e.clientY - characterScreen[1]) <= characterScreen[2]) {
+    nod();
+    return;
+  }
+  if (!neonOn) return;
+  const { width: W, height: H, hotspots } = scene.m;
+  const nx = (2 * e.clientX / innerWidth - 1) / cover[0];
+  const ny = (1 - 2 * e.clientY / innerHeight - lift) / cover[1];
+  const x = (nx + 1) / 2 * W, y = (1 - ny) / 2 * H;
+  for (const name of ["sign", "floor"]) {
+    const r = hotspots[name];
+    if (x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) {
+      glitch = { groups: name === "sign" ? ["heading", "title", "prefix"] : ["floor"],
+                 keys: STUTTER, start: performance.now() };
+      return;
+    }
+  }
 }
 
 addEventListener("pointermove", onPointer);
-addEventListener("pointerdown", onPointer);
 
 // ---- neon state -------------------------------------------------------------
 
 const levels = { heading: 0, title: 0, prefix: 0, floor: 0 };
 let revealStart = null;
-let glitch = null;          // { group | "power", keys: [[t, level]], start }
+let neonOn = false;
+let neonChange = null;
+let glitch = null;
+
+function neonLevelAt(now) {
+  return neonChange ? stepped(neonChange.keys, (now - neonChange.start) / 1000, neonChange.before) : Number(neonOn);
+}
 let nextGlitchAt = Infinity;
 
 function stepped(keys, t, before) {
@@ -430,26 +507,25 @@ function startGlitch(now) {
   const r = Math.random();
   if (r < 0.2) {
     // The S' gives out for a moment: back to plain "Care Bear".
-    glitch = { group: "prefix", start: now,
+    glitch = { groups: ["prefix"], start: now,
                keys: [[0, 0.3], [0.05, 0], [1.4, 0.6], [1.46, 0], [1.6, 1]] };
   } else if (r < 0.35) {
-    glitch = { group: "power", start: now,
+    glitch = { groups: GROUPS, power: true, start: now,
                keys: [[0, 0.45], [0.07, 1], [0.16, 0.6], [0.22, 1]] };
   } else {
     const group = GROUPS[Math.floor(Math.random() * GROUPS.length)];
-    glitch = { group, start: now,
-               keys: [[0, 0.25], [0.04, 1], [0.1, 0], [0.14, 0.8], [0.2, 1]] };
+    glitch = { groups: [group], start: now, keys: STUTTER };
   }
 }
 
 function updateNeon(now) {
   if (revealStart === null) return 1;
   const t = (now - revealStart) / 1000;
-  for (const g of GROUPS) levels[g] = stepped(REVEAL[g], t, 0);
+  for (const g of GROUPS) levels[g] = stepped(REVEAL[g], t, 0) * neonLevelAt(now);
 
   if (t > RSVP_AT) rsvp.classList.add("on");
-  if (t > RSVP_AT && nextGlitchAt === Infinity) scheduleGlitch(now);
-  if (!glitch && now >= nextGlitchAt) startGlitch(now);
+  if (neonOn && t > RSVP_AT && nextGlitchAt === Infinity) scheduleGlitch(now);
+  if (neonOn && !glitch && now >= nextGlitchAt) startGlitch(now);
 
   let power = 1;
   if (glitch) {
@@ -460,12 +536,8 @@ function updateNeon(now) {
       scheduleGlitch(now);
     } else {
       const v = stepped(glitch.keys, gt, 1);
-      if (glitch.group === "power") {
-        power = v;
-        for (const g of GROUPS) levels[g] *= v;
-      } else {
-        levels[glitch.group] *= v;
-      }
+      if (glitch.power) power = v;
+      for (const g of glitch.groups) levels[g] *= v;
     }
   }
   return power;
@@ -478,10 +550,13 @@ let swing = null;
 let proj = null;
 let cover = [1, 1];
 let lift = LIFT;
+let dprCap = 2;
+let slowFrames = 0;
+let lastFrame = 0;
 
 function resize() {
   const cw = innerWidth, ch = innerHeight;
-  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const dpr = Math.min(devicePixelRatio || 1, dprCap);
   canvas.width = Math.round(cw * dpr);
   canvas.height = Math.round(ch * dpr);
   gl.viewport(0, 0, canvas.width, canvas.height);
@@ -509,15 +584,12 @@ function toCanvas(viewProj, p) {
   return [(x + 1) / 2 * canvas.width, (y + 1) / 2 * canvas.height];
 }
 
-// The chain hangs from beside the bulb, parallel to the cord, and swings with the lamp.
-function placeChain(viewProj, sw, angle) {
-  const up = norm([sw.pivot[0] - sw.bulb[0], sw.pivot[1] - sw.bulb[1], sw.pivot[2] - sw.bulb[2]]);
-  const top = [0, 1, 2].map(i => sw.bulb[i] + up[i] * CHAIN.rise + (i === 0 ? CHAIN.side : 0));
-  const end = top.map((v, i) => v - up[i] * CHAIN.length);
-  const scale = canvas.width / innerWidth;
-  const [a, b] = [top, end].map(p => {
-    const [x, y] = toCanvas(viewProj, rotateAround(p, sw.pivot, sw.axis, angle));
-    return [x / scale, innerHeight - y / scale];
+function placeChain(viewProj) {
+  const { anchor, down, length } = scene.m.chain;
+  const end = anchor.map((v, i) => v + down[i] * length);
+  const [a, b] = [anchor, end].map(p => {
+    const [x, y] = toCanvas(viewProj, p);
+    return [x * innerWidth / canvas.width, innerHeight - y * innerHeight / canvas.height];
   });
   chain.style.height = `${Math.hypot(b[0] - a[0], b[1] - a[1])}px`;
   chain.style.transform = `translate(${a[0]}px, ${a[1]}px) rotate(${Math.atan2(a[0] - b[0], b[1] - a[1])}rad)`;
@@ -525,23 +597,47 @@ function placeChain(viewProj, sw, angle) {
 
 function frame(now) {
   // With no recent input, drift gently so the room never looks frozen.
-  if (now - tilt.lastInput > 2500) {
+  const dt = Math.min(0.1, lastFrame ? (now - lastFrame) / 1000 : 1 / 60);
+  lastFrame = now;
+  // Step resolution down if the phone can't hold 60fps; lag reads worse than softness.
+  slowFrames = dt > 0.022 ? slowFrames + 1 : Math.max(0, slowFrames - 1);
+  if (slowFrames > 45 && dprCap > 1.25) {
+    dprCap -= 0.25;
+    slowFrames = 0;
+    resize();
+  }
+
+  const idle = now - tilt.lastInput > 2500;
+  if (idle) {
     tilt.tx = Math.sin(now / 2300) * 0.35;
     tilt.ty = Math.sin(now / 3100) * 0.2;
   }
-  tilt.x += (tilt.tx - tilt.x) * 0.08;
-  tilt.y += (tilt.ty - tilt.y) * 0.08;
+  // Follow real input almost immediately; ease into and out of the idle drift.
+  const follow = 1 - Math.exp(-dt / (idle ? 0.6 : 0.04));
+  tilt.x += (tilt.tx - tilt.x) * follow;
+  tilt.y += (tilt.ty - tilt.y) * follow;
 
   const sw = scene.m.swing;
-  if (swing && swing.pollUpload) swing.pollUpload();
-  const angle = swingAngle(sw, swing, now);
+  const angle = Motion.step(swing, dt);
+  const character = scene.m.motion.character;
+  nodAngle = Motion.sample(character.nod, character.fps, (now - nodStart) / 1000);
   const lit = !!(swing && swing.ready);
 
   const eye = [tilt.x * EYE_TRAVEL[0], -tilt.y * EYE_TRAVEL[1], 0];
   const viewProj = mul(proj, lookAt(eye, [0, 0, -scene.m.focus]));
+  const head = rotateAround(character.hit, character.pivot, character.axis, nodAngle);
+  const center = toCanvas(viewProj, head);
+  const side = toCanvas(viewProj, [head[0] + character.radius, head[1], head[2]]);
+  characterScreen = [center[0] * innerWidth / canvas.width,
+                     innerHeight - center[1] * innerHeight / canvas.height,
+                     Math.abs(side[0] - center[0]) * innerWidth / canvas.width];
   const power = updateNeon(now);
   const bulb = 1 + Math.sin(now / 170) * 0.012 + Math.sin(now / 47) * 0.008;
-  const bulbLevel = lightsOnAt === null ? 0 : stepped(BULB_ON, (now - lightsOnAt) / 1000, 0);
+  const bulbLevel = bulbLevelAt(now);
+  if (sw) {
+    const [bx, by] = toCanvas(viewProj, rotateAround(sw.bulb, sw.pivot, sw.axis, angle));
+    bulbScreen = [bx * innerWidth / canvas.width, innerHeight - by * innerHeight / canvas.height];
+  }
 
   gl.useProgram(scenePass.p);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -551,15 +647,19 @@ function frame(now) {
   gl.uniform1f(u.uTime, now / 1000);
   if (swing) {
     gl.activeTexture(gl.TEXTURE6);
-    gl.bindTexture(gl.TEXTURE_2D, swing.tex);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, swing.tex);
+    gl.uniform3fv(u.uLightBlend, Motion.blend(scene.m.motion.lighting.angles, angle));
+    gl.uniform1f(u.uLightReference, scene.m.motion.lighting.reference);
   }
 
   gl.clear(gl.COLOR_BUFFER_BIT);
   for (const L of scene.layers) {
     gl.uniform4f(u.uRect, ...L.rect);
+    gl.uniform1f(u.uStep, L.step);
     gl.uniform4fv(u.uGlowRect, L.glowRects);
     gl.uniform1f(u.uGrain, L.name === "room" ? 1 : 0);
     gl.uniform1f(u.uAngle, L.name === "lamp" ? angle : 0);
+    gl.uniform1f(u.uNod, L.name === "chars" ? nodAngle : 0);
     gl.uniform1f(u.uUseLight, lit && L.lightRect ? 1 : 0);
     if (L.lightRect) gl.uniform4fv(u.uLightRect, L.lightRect);
     gl.activeTexture(gl.TEXTURE0);
@@ -574,23 +674,29 @@ function frame(now) {
     gl.drawElements(gl.TRIANGLES, L.mesh.count, gl.UNSIGNED_INT, 0);
   }
 
-  if (sw) {
+  if (sw && bulbLevel > 0) {
+    // The glow is invisible beyond ~0.3 screen heights, so only shade that square.
+    const [bx, by] = toCanvas(viewProj, rotateAround(sw.bulb, sw.pivot, sw.axis, angle));
+    const r = canvas.height * 0.3;
     gl.useProgram(haloPass.p);
     gl.blendFunc(gl.ONE, gl.ONE);
-    gl.uniform2fv(haloPass.u.uCenter, toCanvas(viewProj, rotateAround(sw.bulb, sw.pivot, sw.axis, angle)));
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(Math.floor(bx - r), Math.floor(by - r), Math.ceil(2 * r), Math.ceil(2 * r));
+    gl.uniform2f(haloPass.u.uCenter, bx, by);
     gl.uniform1f(haloPass.u.uSize, canvas.height);
     gl.uniform3fv(haloPass.u.uColor, BULB_COLOR.map(c => c * power * bulb * bulbLevel));
     gl.bindVertexArray(haloVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    placeChain(viewProj, sw, angle);
+    gl.disable(gl.SCISSOR_TEST);
   }
+  if (scene.m.chain) placeChain(viewProj);
   requestAnimationFrame(frame);
 }
 
 async function main() {
   scene = await loadScene();
   proj = perspective(scene.m.tanX, scene.m.tanY, 0.1, 50);
-  if (scene.m.swing && scene.m.swing.video) swing = setupSwing(scene.m.swing);
+  swing = await setupSwing(scene.m.motion.lighting);
   rsvp.href = PARTIFUL_URL;
   rsvp.hidden = false;
 
@@ -598,9 +704,22 @@ async function main() {
   addEventListener("resize", resize);
   requestAnimationFrame(frame);
   loadingEl.remove();
-  chain.hidden = !scene.m.swing;
+  chain.hidden = !scene.m.chain;
   chain.addEventListener("click", pull);
-  canvas.addEventListener("click", pull);
+  let pointerStart = null, dragged = false;
+  canvas.addEventListener("pointerdown", e => {
+    pointerStart = [e.clientX, e.clientY];
+    dragged = false;
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (pointerStart && Math.hypot(e.clientX - pointerStart[0], e.clientY - pointerStart[1]) > 10) dragged = true;
+  });
+  canvas.addEventListener("pointercancel", () => { pointerStart = null; dragged = true; });
+  canvas.addEventListener("click", e => {
+    if (!dragged) tapScene(e);
+    pointerStart = null;
+  });
+  addEventListener("visibilitychange", () => { lastFrame = 0; if (swing) swing.input = null; });
   setupMotion(false);
 }
 

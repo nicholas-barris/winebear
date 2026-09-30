@@ -1,7 +1,7 @@
 // Headless check: serves public/ on a fake https origin via CDP, emulates a phone,
 // waits for load, and screenshots the reveal and tilt. Usage: node tools/snap.mjs [outDir]
 import { spawn } from "node:child_process";
-import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,13 +10,17 @@ const OUT = process.argv[2] || "/tmp/scare-bear-snaps";
 const ORIGIN = "https://scarebear.test";
 mkdirSync(OUT, { recursive: true });
 
-const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".jpg": "image/jpeg", ".png": "image/png" };
+const PROFILE = mkdtempSync("/tmp/scare-bear-chrome-");
+const failures = [];
+const checks = [];
+const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".mp4": "video/mp4" };
 const chrome = spawn("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
   "--headless=new", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check",
-  "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--user-data-dir=/tmp/scare-bear-chrome`,
+  "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--user-data-dir=${PROFILE}`,
   "about:blank",
 ], { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
-chrome.stderr.on("data", d => process.stderr.write("chrome: " + d));
+const chromeLog = [];
+chrome.stderr.on("data", d => chromeLog.push(d.toString()));
 chrome.on("exit", c => console.log("chrome exited", c));
 
 const toChrome = chrome.stdio[3], fromChrome = chrome.stdio[4];
@@ -62,7 +66,7 @@ listeners.push(async msg => {
     }
   }
   if (msg.method === "Runtime.consoleAPICalled") console.log("console:", msg.params.args.map(a => a.value ?? a.description).join(" "));
-  if (msg.method === "Runtime.exceptionThrown") console.log("EXCEPTION:", JSON.stringify(msg.params.exceptionDetails).slice(0, 600));
+  if (msg.method === "Runtime.exceptionThrown") failures.push(JSON.stringify(msg.params.exceptionDetails).slice(0, 600));
 });
 
 await S("Fetch.enable", { patterns: [{ urlPattern: `${ORIGIN}/*` }] });
@@ -74,36 +78,154 @@ await S("Emulation.setTouchEmulationEnabled", { enabled: true });
 await S("Page.navigate", { url: ORIGIN + "/" });
 
 async function snap(name) {
-  const { data } = await S("Page.captureScreenshot", { format: "jpeg", quality: 80 });
-  writeFileSync(join(OUT, name + ".jpg"), Buffer.from(data, "base64"));
+  const { data } = await S("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(OUT, name + ".png"), Buffer.from(data, "base64"));
   console.log("snap", name);
 }
 async function evalJs(expr) {
   const r = await S("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true });
+  if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails));
   return r.result.value;
 }
 
-for (let i = 0; i < 40 && (await evalJs("!!document.getElementById('loading')")); i++) await sleep(250);
-if (process.env.MAGENTA) await evalJs("gl.clearColor(1, 0, 1, 1)");
-await snap("0-dark");
-await evalJs("document.getElementById('chain').click()");
-await sleep(160);
-await snap("0-pulled");
-await sleep(2000);
-await snap("1-mid-reveal");
-await sleep(5000);
-await snap("2-revealed");
-// Pin tilt to the extremes by dispatching orientation events.
-for (const [name, g, b] of [["3-tilt-left", -30, 0], ["4-tilt-right", 30, 0], ["5-tilt-up", 0, -30], ["6-tilt-down", 0, 30], ["7-corner", 30, 30]]) {
-  await evalJs(`(() => { for (let k = 0; k < 30; k++) dispatchEvent(Object.assign(new Event('deviceorientation'), { gamma: 0, beta: 45 })); })()`);
-  await evalJs(`(() => { const e = new Event('deviceorientation'); e.gamma = ${g}; e.beta = ${45 + b}; dispatchEvent(e); })()`);
-  await sleep(900);
-  await snap(name);
+function check(name, passed, detail = null) {
+  checks.push({ name, passed, detail });
+  if (!passed) failures.push(name);
+  console.log(passed ? "PASS" : "FAIL", name, detail ?? "");
 }
-console.log("swing:", await evalJs("swing ? JSON.stringify({ ready: swing.ready, paused: swing.video.paused, t: swing.video.currentTime.toFixed(2), err: swing.video.error && swing.video.error.code }) : 'no video'"));
-for (const i of [0, 1, 2]) {
-  await sleep(i ? 650 : 3000);
-  await snap(`8-swing-${i}`);
+async function tap(x, y) {
+  await S("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  await S("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
-chrome.kill();
-process.exit(0);
+async function pullChain() {
+  const [x, y] = await evalJs("(() => { const r = chain.querySelector('.bead').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()");
+  await tap(x, y);
+}
+async function neutral() {
+  await evalJs("Object.assign(tilt, {x: 0, y: 0, tx: 0, ty: 0, lastInput: performance.now()})");
+  await sleep(100);
+}
+async function uncovered() {
+  return evalJs(`new Promise(resolve => requestAnimationFrame(() => {
+    const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+    gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let count = 0;
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 240 && pixels[i + 1] < 15 && pixels[i + 2] > 240) count++;
+    resolve(count);
+  }))`);
+}
+try {
+  for (let i = 0; i < 120 && (await evalJs("!!document.getElementById('loading')")); i++) await sleep(250);
+  check("scene loaded", await evalJs("!!scene && !document.getElementById('loading')"));
+  if (process.env.MAGENTA) await evalJs("gl.clearColor(1, 0, 1, 1)");
+  await snap("0-dark");
+  await pullChain();
+  check("first pull starts neon with bulb delayed", await evalJs("revealStart !== null && neonOn && bulbLevelAt(revealStart + 1500) === 0"));
+  await sleep(1000);
+  await snap("1-neon-only");
+  await sleep(1400);
+  await snap("2-bulb-reveal");
+  await sleep(4000);
+  await neutral();
+  await snap("3-revealed");
+  check("RSVP appears", await evalJs("rsvp.classList.contains('on')"));
+  check("angle-addressable lighting loaded", await evalJs("swing.ready && scene.m.motion.lighting.files.length === 18"));
+  check("date clears RSVP", await evalJs(`(() => {
+    const y = (1 - ((1 - 2 * scene.m.keep[1] / scene.m.height) * cover[1] + lift)) / 2 * innerHeight;
+    return rsvp.getBoundingClientRect().top - y >= DATE_GAP - 0.5;
+  })()`));
+  // Keep tilt fixed while the lamp swings, then check the chain does not follow it.
+  const chainBefore = await evalJs("chain.style.transform");
+  await sleep(600);
+  check("chain stays on sign as lamp swings", chainBefore === await evalJs("chain.style.transform"));
+  const bulb = await evalJs("bulbScreen");
+  await tap(...bulb);
+  await sleep(350);
+  check("bulb tap turns light off", await evalJs("!bulbOn && bulbLevelAt(performance.now()) === 0"));
+  await snap("4-bulb-off");
+  await tap(...await evalJs("bulbScreen"));
+  await sleep(400);
+  check("bulb tap turns light on", await evalJs("bulbOn && bulbLevelAt(performance.now()) === 1"));
+  await pullChain();
+  await sleep(350);
+  check("second pull turns neon off", await evalJs("!neonOn && Object.values(levels).every(v => v === 0)"));
+  await snap("5-neon-off");
+  await pullChain();
+  await sleep(400);
+  check("third pull turns neon on", await evalJs("neonOn && Object.values(levels).every(v => v === 1)"));
+  for (const name of ["sign", "floor"]) {
+    await neutral();
+    const [x, y] = await evalJs(`(() => {
+      const r = scene.m.hotspots['${name}'];
+      return [((2 * (r[0] + r[2] * 0.5) / scene.m.width - 1) * cover[0] + 1) / 2 * innerWidth,
+              (1 - ((1 - 2 * (r[1] + r[3] * 0.4) / scene.m.height) * cover[1] + lift)) / 2 * innerHeight];
+    })()`);
+    await tap(x, y);
+    check(`${name} tap starts local flicker`, await evalJs(`glitch?.groups.join(',') === '${name === "sign" ? "heading,title,prefix" : "floor"}'`));
+    await sleep(300);
+  }
+  await neutral();
+  await evalJs("swing.input = 0; swing.angle = 0; swing.velocity = 0");
+  await evalJs("baseline = {g: 0, b: 45}; onOrientation({gamma: -20, beta: 45})");
+  check("phone movement pushes lamp", await evalJs("swing.velocity > 0.2"));
+  await sleep(350);
+  check("lamp responds to push", await evalJs("swing.angle > 0.03"));
+  await neutral();
+  const head = await evalJs("characterScreen.slice(0,2)");
+  await tap(...head);
+  check("tap Nick starts Blender nod", await evalJs("performance.now() - nodStart < 500"));
+  check("head moves during reaction", await evalJs(`new Promise(resolve => {
+    let max = 0; const until = performance.now() + 900;
+    function observe(now) {
+      max = Math.max(max, Math.abs(nodAngle));
+      if (now >= until) resolve(max > 0.015); else requestAnimationFrame(observe);
+    }
+    requestAnimationFrame(observe);
+  })`));
+  await snap("8-nick-nod");
+  await sleep(1200);
+  check("head returns to rest", await evalJs("nodAngle === 0"));
+  await tap(...await evalJs("characterScreen.slice(0,2)"));
+  check("character reaction replays", await evalJs("performance.now() - nodStart < 500"));
+  await sleep(1200);
+  for (const [name, x, y] of [["left", -1, 0], ["right", 1, 0], ["up", 0, -1], ["down", 0, 1],
+                             ["top-left", -1, -1], ["top-right", 1, -1], ["bottom-left", -1, 1], ["bottom-right", 1, 1]]) {
+    await evalJs(`baseline = {g: 0, b: 45}; onOrientation({gamma: ${-x * 30}, beta: ${45 + y * 30}})`);
+    await sleep(350);
+    if (process.env.MAGENTA) {
+      const count = await uncovered();
+      check(`no exposed background: ${name}`, count === 0, { magentaPixels: count });
+    }
+    await snap(`6-tilt-${name}`);
+  }
+  check("WebGL has no errors", await evalJs("gl.getError() === gl.NO_ERROR"));
+  await neutral();
+  await snap("7-final");
+  if (process.env.MOTION_CLIP) {
+    await evalJs("window.savedSample = Motion.sample; window.savedStep = Motion.step; window.clipNod = 0; window.clipAngle = 0; Motion.sample = () => window.clipNod; Motion.step = () => window.clipAngle; nextGlitchAt = performance.now() + 60000; glitch = null");
+    for (let i = 0; i < 24; i++) {
+      await evalJs(`window.clipNod = window.savedSample(scene.m.motion.character.nod, 60, ${i / 12}); window.clipAngle = 0.28 * Math.exp(-${i / 12} * 0.7) * Math.sin(${i / 12} * 2.1); Object.assign(tilt, {x:0,y:0,tx:0,ty:0,lastInput:performance.now()})`);
+      await sleep(40);
+      await snap(`motion-${String(i).padStart(2, "0")}`);
+    }
+    await evalJs("Motion.sample = window.savedSample; Motion.step = window.savedStep");
+  }
+  // A fresh load exercises the alternative first-tap path.
+  await S("Page.reload");
+  for (let i = 0; i < 120; i++) {
+    await sleep(250);
+    if (await evalJs("typeof scene !== 'undefined' && !!scene && !document.getElementById('loading')")) break;
+  }
+  await tap(VW * 0.2, VH * 0.7);
+  check("first tap anywhere starts reveal", await evalJs("revealStart !== null && neonOn"));
+} catch (err) {
+  failures.push(err.stack);
+} finally {
+  writeFileSync(join(OUT, "chrome.log"), chromeLog.join(""));
+  writeFileSync(join(OUT, "results.json"), JSON.stringify({ viewport: [VW, VH], checks, failures }, null, 2));
+  console.log(JSON.stringify({ failures }));
+  chrome.kill();
+  await new Promise(resolve => chrome.once("exit", resolve));
+  rmSync(PROFILE, { recursive: true, force: true });
+}
+process.exit(failures.length ? 1 : 0);

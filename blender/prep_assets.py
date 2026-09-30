@@ -9,7 +9,7 @@ os.makedirs(DST, exist_ok=True)
 
 LAYERS = ["room", "chars", "sign", "lamp"]
 GROUPS = ["heading", "title", "prefix", "floor"]
-STEP = 4                      # mesh vertex spacing in image pixels
+STEPS = {"room": 8}           # mesh vertex spacing in image pixels; the flat room needs far fewer
 TAN_X, Z_NEAR, Z_FAR, FOCUS = 0.29603222293561626, 0.1, 20.0, 5.145
 
 def load(name, folder=SRC):
@@ -58,7 +58,7 @@ def bleed(rgba, iters=8):
         known |= fill
     return rgb
 
-manifest = {"tanX": TAN_X, "zNear": Z_NEAR, "zFar": Z_FAR, "focus": FOCUS, "step": STEP, "layers": {}}
+manifest = {"tanX": TAN_X, "zNear": Z_NEAR, "zFar": Z_FAR, "focus": FOCUS, "layers": {}}
 for layer in LAYERS:
     base = load(f"{layer}_base.png")
     H, W = base.shape[:2]
@@ -93,9 +93,10 @@ for layer in LAYERS:
     # Depth sampled at mesh vertices only, 16-bit split across R (high) and G (low).
     d = load(f"{layer}_depth.png")
     q = np.round(d[..., 0] * 255).astype(np.int64) * 256 + np.round(d[..., 1] * 255).astype(np.int64)
-    nx, ny = -(-rect[2] // STEP) + 1, -(-rect[3] // STEP) + 1
-    xs = np.minimum(rect[0] + np.arange(nx) * STEP, rect[0] + rect[2] - 1)
-    ys = np.minimum(rect[1] + np.arange(ny) * STEP, rect[1] + rect[3] - 1)
+    step = STEPS.get(layer, 4)
+    nx, ny = -(-rect[2] // step) + 1, -(-rect[3] // step) + 1
+    xs = np.minimum(rect[0] + np.arange(nx) * step, rect[0] + rect[2] - 1)
+    ys = np.minimum(rect[1] + np.arange(ny) * step, rect[1] + rect[3] - 1)
     grid = q[np.ix_(ys, xs)]
     enc = np.zeros((ny, nx, 3), dtype=np.float32)
     enc[..., 0] = ((grid >> 8) + 0.25) / 255
@@ -104,7 +105,7 @@ for layer in LAYERS:
     save(enc, depth_file, 'PNG')
 
     manifest["layers"][layer] = {"rect": rect, "base": base_file, "depth": depth_file,
-                                 "grid": [int(nx), int(ny)], "glows": glows}
+                                 "grid": [int(nx), int(ny)], "step": step, "glows": glows}
     print("LAYER", layer, rect, "grid", nx, ny, "glows", {k: v["rect"] for k, v in glows.items()}, flush=True)
 
 # Image rows that must stay on screen: top of the heading's glow down to the bottom of the date's.
@@ -114,28 +115,55 @@ def light_rows(layer, group, threshold):
     return int(rows.min()), int(rows.max())
 manifest["keep"] = [light_rows("sign", "heading", 0.1)[0], light_rows("room", "floor", 0.15)[1]]
 
+sign = load("sign_base.png")
+sign_rect = bbox(sign[..., 3] > 0.5, 0)
+x = int(sign_rect[0] + 0.93 * (sign_rect[2] - 1))
+y = int(np.nonzero(sign[:, x, 3] > 0.5)[0].max())
+depth = load("sign_depth.png")[y, x]
+q = round(float(depth[0]) * 255) * 256 + round(float(depth[1]) * 255)
+z = Z_NEAR + q / 65535 * (Z_FAR - Z_NEAR)
+anchor = [((x + 0.5) / W * 2 - 1) * TAN_X * z,
+          (1 - (y + 0.5) / H * 2) * manifest["tanY"] * z, -z]
+base, lit = load("room_base.png"), load("room_floor.png")
+floor = bbox((lit[..., :3] * lit[..., 3:4] - base[..., :3] * base[..., 3:4]).max(axis=2) > 0.15, 0)
+manifest["hotspots"] = {"sign": sign_rect, "floor": floor}
+
 # Lamp hinge data from the layer render, plus (once rendered) the swing lighting video:
 # room + character crop stacked into one frame per hinge angle, played 0..48 then 47..1
 # so the loop matches the original 96-frame back-and-forth.
 manifest["swing"] = json.load(open(os.path.join(SRC, "swing.json")))
+down = np.array(manifest["swing"]["bulb"]) - np.array(manifest["swing"]["pivot"])
+manifest["chain"] = {"anchor": anchor, "down": (down / np.linalg.norm(down)).tolist(), "length": 0.36}
 if os.path.exists(os.path.join(SWING, "angles.json")):
     angles = json.load(open(os.path.join(SWING, "angles.json")))
     W, H = manifest["width"], manifest["height"]
     cr = manifest["layers"]["chars"]["rect"]
     aw, ah = W, H + cr[3] + (H + cr[3]) % 2
-    unique, seq = tempfile.mkdtemp(), tempfile.mkdtemp()
-    for k in range(len(angles)):
-        atlas = np.zeros((ah, aw, 3), dtype=np.float32)
-        atlas[:H] = load(f"room_{k:02d}.png", SWING)[..., :3]
-        atlas[H:H+cr[3], :cr[2]] = bleed(crop(load(f"chars_{k:02d}.png", SWING), cr))
-        save(atlas, f"u{k:02d}.png", 'PNG', folder=unique)
-    order = list(range(len(angles))) + list(range(len(angles) - 2, 0, -1))
-    for i, k in enumerate(order):
-        shutil.copy(os.path.join(unique, f"u{k:02d}.png"), os.path.join(seq, f"f{i:03d}.png"))
-    subprocess.run([bpy.app.binary_path, "-b", "--factory-startup", "-P",
-                    os.path.join(os.path.dirname(__file__), "encode_swing.py"), "--",
-                    seq, os.path.join(DST, "swing.mp4"), str(aw), str(ah), "24"], check=True)
-    shutil.rmtree(unique); shutil.rmtree(seq)
+    video = os.path.join(DST, "swing.mp4")
+    inputs = [os.path.join(root, name) for root, _, names in os.walk(SWING) for name in names]
+    inputs += [os.path.join(SRC, "chars_base.png"),
+               os.path.join(os.path.dirname(__file__), "encode_swing.py")]
+    previous_path = os.path.join(DST, "manifest.json")
+    previous = json.load(open(previous_path)).get("swing", {}) if os.path.exists(previous_path) else {}
+    current = (os.path.exists(video) and os.path.getmtime(video) > max(map(os.path.getmtime, inputs))
+               and previous.get("atlas") == [aw, ah]
+               and previous.get("light", {}).get("chars") == [0, H, cr[2], cr[3]])
+    if current:
+        print("VIDEO swing.mp4 is current; skipping encode", flush=True)
+    else:
+        unique, seq = tempfile.mkdtemp(), tempfile.mkdtemp()
+        for k in range(len(angles)):
+            atlas = np.zeros((ah, aw, 3), dtype=np.float32)
+            atlas[:H] = load(f"room_{k:02d}.png", SWING)[..., :3]
+            atlas[H:H+cr[3], :cr[2]] = bleed(crop(load(f"chars_{k:02d}.png", SWING), cr))
+            save(atlas, f"u{k:02d}.png", 'PNG', folder=unique)
+        order = list(range(len(angles))) + list(range(len(angles) - 2, 0, -1))
+        for i, k in enumerate(order):
+            shutil.copy(os.path.join(unique, f"u{k:02d}.png"), os.path.join(seq, f"f{i:03d}.png"))
+        subprocess.run([bpy.app.binary_path, "-b", "--factory-startup", "-P",
+                        os.path.join(os.path.dirname(__file__), "encode_swing.py"), "--",
+                        seq, os.path.join(DST, "swing.mp4"), str(aw), str(ah), "24"], check=True)
+        shutil.rmtree(unique); shutil.rmtree(seq)
     manifest["swing"].update(video="swing.mp4", fps=24, angles=angles, atlas=[aw, ah],
                              light={"room": [0, 0, W, H], "chars": [0, H, cr[2], cr[3]]})
 
