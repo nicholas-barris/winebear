@@ -1,6 +1,6 @@
-# Three.js + Rapier physics preview
+# Three.js + Rapier invitation
 
-Open `/physics.html` through the existing server. The production `/` page is unchanged.
+The main `/` invitation uses Three.js and Rapier. `/physics.html` remains available as an alternate entry point to the same experience.
 
 Tap Noah (right character) to release his head. Drag the loose head to lift it with a spring, then release it. After eight seconds without interaction it fades out and returns. Reduced motion uses the existing small attached nod. Lamp, neon, tilt, dust and RSVP controls remain available.
 
@@ -20,11 +20,11 @@ Three.js owns every draw call. RawShaderMaterial preserves the existing Blender-
 
 Rapier runs at 120 fixed steps per second with interpolated display poses. It uses the precomputed head hull, a floor aligned to the Blender floor, and invisible bounds to keep the toy in view. Grabbing applies a damped spring force. Geometry, UVs and normals used for rendering are not simplified.
 
-Collision proxies do not include the other character or furnishings. The original room shadows remain baked; a soft contact shadow follows the loose head. Controller and shaders are isolated from the production page, so later production edits must be ported deliberately.
+Collision proxies do not include the other character or furnishings. The original room shadows remain baked; a soft contact shadow follows the loose head. Rendering and physics controllers live in this directory. The former renderer remains in the repository for reference; the main page loads the bundled physics runtime.
 
 ## Rebuild
 
-Run `npm ci`, then `npm run build:physics`. The build uses pinned Three.js 0.186.1, Rapier 0.21.0 and esbuild 0.25.12. It regenerates `runtime.js`, the hashed WASM and gzip companion, the collision hull, and the preload/version references in `bootstrap.js` and `physics.html`. Commit the generated outputs along with source edits. No build step or external CDN is needed to serve the site. Licenses are in `../vendor`.
+Run `npm ci`, then `npm run build:physics`. The build uses pinned Three.js 0.186.1, Rapier 0.21.0 and esbuild 0.25.12. It regenerates `runtime.js`, the hashed WASM and gzip companion, the collision hull, and the preload/version references in `bootstrap.js`, `index.html` and `physics.html`. Commit the generated outputs along with source edits. No build step or external CDN is needed to serve the site. Licenses are in `../vendor`.
 
 The Rapier build adapter instantiates the official package's WASM with its generated JavaScript bindings. This avoids the compatibility package's large embedded base64 string. Recheck the adapter if Rapier is upgraded.
 
@@ -33,5 +33,6 @@ The Rapier build adapter instantiates the official package's WASM with its gener
 - `node tools/physics-test.mjs`: hull source match, floor collision, frame-rate independence, drag trajectory, reset and reduced motion.
 - `node tools/server-test.mjs`: WASM compression negotiation, byte correctness, MIME, cache validators and ranges.
 - `PHYSICS_CHECK=1 VIEWPORT=393x697 TMPDIR=/tmp/sbtmp node tools/snap.mjs /tmp/physics-check`: browser interaction and screenshots.
+- Add `PHYSICS_PATH=/` to test the main invitation entry point.
 - Add `PHYSICS_LOADING_CHECK=1` to hold the head download, verify the invitation still opens, and test a queued tap.
-- `RENDER_COMPARE=1` captures a fixed lighting pose; combine with `PHYSICS_CHECK=1` for the prototype or omit for production.
+- `RENDER_COMPARE=1` captures a fixed lighting pose; combine with `PHYSICS_CHECK=1`; add `PHYSICS_PATH=/` for the main address.

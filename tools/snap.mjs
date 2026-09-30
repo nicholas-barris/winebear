@@ -8,6 +8,7 @@ import { join, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = process.env.ASSET_ROOT || join(dirname(fileURLToPath(import.meta.url)), "..", "public");
+const physicsCheck = Boolean(process.env.PHYSICS_CHECK || readFileSync(join(ROOT, "index.html"), "utf8").includes("physics/bootstrap.js"));
 const OUT = process.argv[2] || "/tmp/scare-bear-snaps";
 const ORIGIN = "https://scarebear.test";
 mkdirSync(OUT, { recursive: true });
@@ -161,7 +162,7 @@ if (openingCheck) await S("Page.addScriptToEvaluateOnNewDocument", {source:`
 const [VW, VH] = (process.env.VIEWPORT || "393x852").split("x").map(Number);
 await S("Emulation.setDeviceMetricsOverride", { width: VW, height: VH, deviceScaleFactor: 2, mobile: true });
 await S("Emulation.setTouchEmulationEnabled", { enabled: true });
-await S("Page.navigate", { url: ORIGIN + (process.env.PHYSICS_CHECK ? "/physics.html" : "/") });
+await S("Page.navigate", { url: ORIGIN + (process.env.PHYSICS_PATH || (process.env.PHYSICS_CHECK ? "/physics.html" : "/")) });
 
 async function snap(name) {
   const { data } = await S("Page.captureScreenshot", { format: "png" });
@@ -250,7 +251,7 @@ try {
     await evalJs("Object.assign(tilt,{x:0,y:0,tx:0,ty:0,lastInput:10000});revealStart=0;bulbChange.start=0;neonOn=true;bulbOn=true;nextGlitchAt=Infinity;glitch=null;Motion.step=()=>0.15;atmosphere=null;atmosphereCanvas.getContext('2d').clearRect(0,0,atmosphereCanvas.width,atmosphereCanvas.height);lastFrame=10000;lampPull=0;dprCap=2;resize();frame(10000);gl.finish()");
     await snap("comparison");return;
   }
-  if (process.env.PHYSICS_CHECK) {
+  if (physicsCheck) {
     check("head finishes background preparation",await waitFor(HEAD_READY,20000));
     check("Three renderer and Rapier collision hull ready", await evalJs("stage.renderer.isWebGLRenderer && !!headDrop?.body && !!headDrop?.collider && !!lampMesh"));
     await pullChain();

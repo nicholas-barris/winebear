@@ -54,12 +54,14 @@ writeFileSync(file('public/physics/assets/head-collider.json'),JSON.stringify(co
 // Content tags make HTML updates safe with the CDN's cached scripts.
 const version=hash(Buffer.concat([readFileSync(file('public/physics/runtime.js')),readFileSync(file('public/physics/main.js')),Buffer.from(JSON.stringify(collision))]));
 writeFileSync(file('public/physics/bootstrap.js'),`import {ThreeStage,PhysicsHead,initializePhysics} from './runtime.js?v=${version}';\nObject.assign(window,{ThreeStage,PhysicsHead});\nwindow.physicsReady=initializePhysics().then(()=>true,error=>{console.warn('Live physics unavailable',error);return false;});\nconst script=document.createElement('script');script.src='physics/main.js?v=${version}';document.body.appendChild(script);\n`);
-const htmlFile=file('public/physics.html');let html=readFileSync(htmlFile,'utf8');
-html=html.replace(/^[ \t]*<link[^>]+data-physics-preload[^>]*>\r?\n/gm,'').replace(/src="physics\/bootstrap.js[^\"]*"/,`src="physics/bootstrap.js?v=${version}"`);
 const scene=JSON.parse(readFileSync(file('public/assets/manifest.json'))),motion=JSON.parse(readFileSync(file('public/assets/motion.json')));
 const criticalImages=new Set(motion.lighting.files);
 for(const layer of Object.values(scene.layers)){criticalImages.add(layer.base);criticalImages.add(layer.depth);for(const glow of Object.values(layer.glows))criticalImages.add(glow.file);}
 const preloads=[...['manifest.json','motion.json','lamp-mesh.json'].map(f=>`  <link data-physics-preload rel="preload" href="assets/${f}" as="fetch" crossorigin>`),...[...criticalImages].map(f=>`  <link data-physics-preload rel="preload" href="assets/${f}" as="image">`)].join('\n')+'\n';
-html=html.replace('  <link rel="stylesheet"', preloads+`  <link data-physics-preload rel="modulepreload" href="physics/runtime.js?v=${version}">\n  <link data-physics-preload rel="preload" href="physics/${wasmName}" as="fetch" crossorigin>\n  <link rel="stylesheet"`);
-writeFileSync(htmlFile,html);
+for (const page of ['public/index.html','public/physics.html']) {
+  const htmlFile=file(page);let html=readFileSync(htmlFile,'utf8');
+  html=html.replace(/^[ \t]*<link[^>]+data-physics-preload[^>]*>\r?\n/gm,'').replace(/src="physics\/bootstrap.js[^\"]*"/,`src="physics/bootstrap.js?v=${version}"`);
+  html=html.replace('  <link rel="stylesheet"', preloads+`  <link data-physics-preload rel="modulepreload" href="physics/runtime.js?v=${version}">\n  <link data-physics-preload rel="preload" href="physics/${wasmName}" as="fetch" crossorigin>\n  <link rel="stylesheet"`);
+  writeFileSync(htmlFile,html);
+}
 console.log(JSON.stringify({runtimeBytes:readFileSync(file('public/physics/runtime.js')).length,runtimeGzip:gzipSync(readFileSync(file('public/physics/runtime.js'))).length,wasmBytes:wasm.length,wasmGzip:gzipSync(wasm).length,hullVertices:collision.vertices.length/3,hullBytes:JSON.stringify(collision).length,version}));
